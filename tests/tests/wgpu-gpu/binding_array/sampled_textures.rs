@@ -231,6 +231,7 @@ async fn binding_array_sampled_textures(ctx: TestingContext, partially_bound: bo
         .create_command_encoder(&CommandEncoderDescriptor { label: None });
     {
         let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            max_draw_count: None,
             label: Some("Render Pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
                 view: &output_view,
@@ -451,6 +452,7 @@ async fn partial_binding_array_followed_by_storage_buffer(ctx: TestingContext) {
         .create_command_encoder(&CommandEncoderDescriptor { label: None });
     {
         let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            max_draw_count: None,
             label: Some("Render Pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
                 view: &output_view,

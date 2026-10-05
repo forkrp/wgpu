@@ -270,6 +270,7 @@ impl crate::framework::Example for Example {
             },
         })];
         let render_pass_descriptor = wgpu::RenderPassDescriptor {
+            max_draw_count: None,
             label: None,
             color_attachments: &color_attachments,
             depth_stencil_attachment: None,

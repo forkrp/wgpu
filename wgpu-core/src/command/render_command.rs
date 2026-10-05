@@ -1,4 +1,4 @@
-use wgt::{BufferAddress, BufferSize, Color};
+use wgt::{BufferAddress, Color};
 
 use super::{DrawCommandFamily, Rect};
 #[cfg(feature = "serde")]
@@ -23,13 +23,13 @@ pub enum RenderCommand<R: ReferenceType> {
         buffer: R::Buffer,
         index_format: wgt::IndexFormat,
         offset: BufferAddress,
-        size: Option<BufferSize>,
+        size: Option<BufferAddress>,
     },
     SetVertexBuffer {
         slot: u32,
         buffer: Option<R::Buffer>,
         offset: BufferAddress,
-        size: Option<BufferSize>,
+        size: Option<BufferAddress>,
     },
     SetBlendConstant(Color),
     SetStencilReference(u32),

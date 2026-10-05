@@ -257,6 +257,7 @@ fn read_only_depth_test(ctx: &TestingContext, sample_depth: bool) {
     // First pass: writable depth, puts the depth texture in `DEPTH_STENCIL_WRITE` state.
     {
         let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
+            max_draw_count: None,
             label: Some("depth write pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
                 view: &color_view,
@@ -288,6 +289,7 @@ fn read_only_depth_test(ctx: &TestingContext, sample_depth: bool) {
     // is also bound as a sampled texture, exercising `DEPTH_STENCIL_READ | RESOURCE`.
     {
         let mut rpass = encoder.begin_render_pass(&RenderPassDescriptor {
+            max_draw_count: None,
             label: Some("depth read pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
                 view: &color_view,

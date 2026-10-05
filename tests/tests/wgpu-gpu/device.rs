@@ -339,6 +339,7 @@ static DEVICE_DESTROY_THEN_MORE: GpuTestConfiguration = GpuTestConfiguration::ne
         ctx.queue.submit([encoder_for_compute_pass.finish()]);
 
         let pass = encoder_for_render_pass.begin_render_pass(&wgpu::RenderPassDescriptor {
+            max_draw_count: None,
             label: None,
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 ops: wgpu::Operations::default(),

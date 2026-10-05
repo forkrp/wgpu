@@ -340,6 +340,7 @@ impl TimestampNormalizer {
         unsafe {
             encoder.transition_buffers(barrier.as_slice());
             encoder.begin_compute_pass(&hal::ComputePassDescriptor {
+                is_empty: false,
                 label: hal_label(
                     Some("(wgpu internal) Timestamp normalization pass"),
                     buffer.device.instance_flags,

@@ -41,6 +41,14 @@ static_assertions::assert_impl_all!(RenderPass<'_>: Send, Sync);
 crate::cmp::impl_eq_ord_hash_proxy!(RenderPass<'_> => .inner);
 
 impl RenderPass<'_> {
+    /// Discard this pass without recording an end command.
+    ///
+    /// The parent command encoder remains locked. This is intended for language
+    /// bindings whose garbage collection must not implicitly end an open pass.
+    pub fn abandon(mut self) {
+        self.inner.abandon();
+    }
+
     /// Drops the lifetime relationship to the parent command encoder, making usage of
     /// the encoder while this pass is recorded a run-time error instead.
     ///
@@ -101,16 +109,12 @@ impl RenderPass<'_> {
     /// Subsequent calls to [`draw_indexed`](RenderPass::draw_indexed) on this [`RenderPass`] will
     /// use `buffer` as the source index buffer.
     ///
-    /// # Panics
-    ///
-    /// - If the buffer slice length is 0.
     pub fn set_index_buffer(&mut self, buffer_slice: BufferSlice<'_>, index_format: IndexFormat) {
         self.inner.set_index_buffer(
             &buffer_slice.buffer.inner,
             index_format,
             buffer_slice.offset,
-            // TODO(https://github.com/gfx-rs/wgpu/issues/3170): Empty slices should be supported here
-            Some(buffer_slice.size_expect_nonzero()),
+            Some(buffer_slice.size()),
         );
     }
 
@@ -127,9 +131,6 @@ impl RenderPass<'_> {
     /// [`draw`]: RenderPass::draw
     /// [`draw_indexed`]: RenderPass::draw_indexed
     ///
-    /// # Panics
-    ///
-    /// - If the buffer slice length is 0.
     pub fn set_vertex_buffer<'b, B>(&mut self, slot: u32, buffer_slice: B)
     where
         Option<BufferSlice<'b>>: From<B>,
@@ -140,8 +141,7 @@ impl RenderPass<'_> {
                 slot,
                 Some(&buffer_slice.buffer.inner),
                 buffer_slice.offset,
-                // TODO(https://github.com/gfx-rs/wgpu/issues/3170): Empty slices should be supported here
-                Some(buffer_slice.size_expect_nonzero()),
+                Some(buffer_slice.size()),
             );
         } else {
             self.inner.set_vertex_buffer(slot, None, 0, None);
@@ -218,6 +218,36 @@ impl RenderPass<'_> {
     /// It is not affected by changes to the state that are performed after it is called.
     pub fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
         self.inner.draw(vertices, instances);
+    }
+
+    /// Draw using explicit WebGPU counts and offsets, without a `Range<u32>` end.
+    pub fn draw_counted(
+        &mut self,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    ) {
+        self.inner
+            .draw_counted(vertex_count, instance_count, first_vertex, first_instance);
+    }
+
+    /// Draw indexed primitives using explicit counts and offsets.
+    pub fn draw_indexed_counted(
+        &mut self,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        base_vertex: i32,
+        first_instance: u32,
+    ) {
+        self.inner.draw_indexed_counted(
+            index_count,
+            instance_count,
+            first_index,
+            base_vertex,
+            first_instance,
+        );
     }
 
     /// Draws indexed primitives using the active index buffer and the active vertex buffers.
@@ -680,6 +710,8 @@ pub struct RenderPassDescriptor<'a> {
     /// This doesn't influence load/store/clear/etc operations, as those are defined for attachments,
     /// therefore affecting all attachments. Meaning, this affects only any shaders executed on the `RenderPass`.
     pub multiview_mask: Option<NonZeroU32>,
+    /// Optional upper bound on draw calls, including executed bundles.
+    pub max_draw_count: Option<u64>,
 }
 #[cfg(send_sync)]
 static_assertions::assert_impl_all!(RenderPassDescriptor<'_>: Send, Sync);

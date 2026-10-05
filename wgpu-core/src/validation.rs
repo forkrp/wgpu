@@ -290,6 +290,7 @@ struct EntryPoint {
     spec_constants: Vec<SpecializationConstant>,
     sampling_pairs: FastHashSet<(naga::Handle<Resource>, naga::Handle<Resource>)>,
     workgroup_size: [u32; 3],
+    workgroup_storage_size: u64,
     dual_source_blending: bool,
     task_payload_size: Option<u32>,
     mesh_info: Option<EntryPointMeshInfo>,
@@ -302,6 +303,41 @@ pub struct Interface {
     resources: naga::Arena<Resource>,
     entry_points: FastHashMap<(naga::ShaderStage, String), EntryPoint>,
     pub(crate) immediate_size: u32,
+    compute_specialization: Option<Box<dyn ComputeSpecialization>>,
+}
+
+trait ComputeSpecialization: fmt::Debug + Send + Sync {
+    fn limits(
+        &self,
+        entry_point_name: &str,
+        constants: &naga::back::PipelineConstants,
+    ) -> Result<([u32; 3], u64), StageError>;
+}
+
+impl ComputeSpecialization for (naga::Module, naga::valid::ModuleInfo) {
+    fn limits(
+        &self,
+        entry_point_name: &str,
+        constants: &naga::back::PipelineConstants,
+    ) -> Result<([u32; 3], u64), StageError> {
+        let (module, info) = naga::back::pipeline_constants::process_overrides(
+            &self.0,
+            &self.1,
+            Some((naga::ShaderStage::Compute, entry_point_name)),
+            constants,
+        )
+        .map_err(|e| StageError::PipelineConstants(e.to_string()))?;
+        let (index, entry_point) = module
+            .entry_points
+            .iter()
+            .enumerate()
+            .find(|(_, ep)| ep.stage == naga::ShaderStage::Compute && ep.name == entry_point_name)
+            .ok_or_else(|| StageError::MissingEntryPoint(entry_point_name.to_string()))?;
+        Ok((
+            entry_point.workgroup_size,
+            Interface::workgroup_storage_size(&module, info.get_entry_point(index)),
+        ))
+    }
 }
 
 #[derive(Debug)]
@@ -420,6 +456,10 @@ impl WebGpuError for InputError {
 pub enum StageError {
     #[error(transparent)]
     InvalidWorkgroupSize(#[from] InvalidWorkgroupSizeError),
+    #[error("Workgroup storage size {size} exceeds max_compute_workgroup_storage_size {limit}")]
+    InvalidWorkgroupStorageSize { size: u64, limit: u32 },
+    #[error("Invalid pipeline constants: {0}")]
+    PipelineConstants(String),
     #[error("Unable to find entry point '{0}'")]
     MissingEntryPoint(String),
     #[error("Shader global {0:?} is not available in the pipeline layout")]
@@ -550,6 +590,8 @@ impl WebGpuError for StageError {
                 error,
             } => error.webgpu_error_type(),
             Self::InvalidWorkgroupSize { .. }
+            | Self::InvalidWorkgroupStorageSize { .. }
+            | Self::PipelineConstants(..)
             | Self::MissingEntryPoint(..)
             | Self::NoEntryPointFound
             | Self::MultipleEntryPointsFound
@@ -1288,6 +1330,9 @@ impl Interface {
             }
             ep.dual_source_blending = info.dual_source_blending;
             ep.workgroup_size = entry_point.workgroup_size;
+            if entry_point.stage == naga::ShaderStage::Compute && module.overrides.is_empty() {
+                ep.workgroup_storage_size = Self::workgroup_storage_size(module, info);
+            }
             ep.immediate_slots_required = info.immediate_slots_used;
 
             if let Some(task_payload) = entry_point.task_payload {
@@ -1329,7 +1374,64 @@ impl Interface {
             resources,
             entry_points,
             immediate_size,
+            compute_specialization: (!module.overrides.is_empty()
+                && module
+                    .entry_points
+                    .iter()
+                    .any(|ep| ep.stage == naga::ShaderStage::Compute))
+            .then(|| -> Box<dyn ComputeSpecialization> {
+                Box::new((module.clone(), info.clone()))
+            }),
         }
+    }
+
+    fn workgroup_storage_size(module: &naga::Module, info: &naga::valid::FunctionInfo) -> u64 {
+        module
+            .global_variables
+            .iter()
+            .filter(|(handle, var)| {
+                var.space == naga::AddressSpace::WorkGroup && !info[*handle].is_empty()
+            })
+            .map(|(_, var)| {
+                let size = u64::from(module.types[var.ty].inner.size(module.to_ctx()));
+                (size + 15) & !15
+            })
+            .sum()
+    }
+
+    pub(crate) fn check_compute_limits(
+        &self,
+        entry_point_name: &str,
+        constants: &naga::back::PipelineConstants,
+    ) -> Result<(), StageError> {
+        let size = if let Some(specialization) = &self.compute_specialization {
+            let (dimensions, size) = specialization.limits(entry_point_name, constants)?;
+            WorkgroupSizeCheck {
+                dimensions: &dimensions,
+                per_dimension_limits: &[
+                    self.limits.max_compute_workgroup_size_x,
+                    self.limits.max_compute_workgroup_size_y,
+                    self.limits.max_compute_workgroup_size_z,
+                ],
+                per_dimension_limits_desc: "max_compute_workgroup_size_*",
+                total_limit: self.limits.max_compute_invocations_per_workgroup,
+                total_limit_desc: "max_compute_invocations_per_workgroup",
+            }
+            .check_and_compute_total_invocations()?;
+            size
+        } else {
+            self.entry_points
+                .get(&(naga::ShaderStage::Compute, entry_point_name.to_string()))
+                .ok_or_else(|| StageError::MissingEntryPoint(entry_point_name.to_string()))?
+                .workgroup_storage_size
+        };
+        if size > u64::from(self.limits.max_compute_workgroup_storage_size) {
+            return Err(StageError::InvalidWorkgroupStorageSize {
+                size,
+                limit: self.limits.max_compute_workgroup_storage_size,
+            });
+        }
+        Ok(())
     }
 
     pub fn immediate_slots_required(

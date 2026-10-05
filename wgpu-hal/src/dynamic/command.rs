@@ -420,6 +420,7 @@ impl<C: CommandEncoder + DynResource> DynCommandEncoder for C {
 
         let desc: RenderPassDescriptor<<C::A as Api>::QuerySet, <C::A as Api>::TextureView> =
             RenderPassDescriptor {
+                is_empty: desc.is_empty,
                 label: desc.label,
                 extent: desc.extent,
                 sample_count: desc.sample_count,
@@ -606,6 +607,7 @@ impl<C: CommandEncoder + DynResource> DynCommandEncoder for C {
 
     unsafe fn begin_compute_pass(&mut self, desc: &ComputePassDescriptor<dyn DynQuerySet>) {
         let desc = ComputePassDescriptor {
+            is_empty: desc.is_empty,
             label: desc.label,
             timestamp_writes: desc
                 .timestamp_writes

@@ -419,6 +419,7 @@ impl crate::framework::Example for Example {
 
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                max_draw_count: None,
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,

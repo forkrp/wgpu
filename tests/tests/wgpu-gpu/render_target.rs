@@ -186,6 +186,7 @@ async fn run_test(
                 array_layer_count: Some(1),
             });
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                max_draw_count: None,
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: ms_texture_view.as_ref().unwrap_or(&out_texture_view),
@@ -382,6 +383,7 @@ async fn run_test_3d(ctx: TestingContext) {
         });
         for layer in 0..DEPTH >> mip {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                max_draw_count: None,
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &out_texture_view,

@@ -379,6 +379,7 @@ fn render_pass(
     let render_target_view = render_target.create_view(&wgpu::TextureViewDescriptor::default());
 
     let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        max_draw_count: None,
         label: None,
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: &render_target_view,

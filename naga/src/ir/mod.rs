@@ -2574,6 +2574,7 @@ pub struct SpecialTypes {
     ///     load_transform: mat3x2<f32>,           //     8   24    168
     ///     size: vec2<u32>,                       //     8    8    192
     ///     num_planes: u32,                       //     4    4    200
+    ///     is_premultiplied: u32,                 //     4    4    204
     /// }                            // whole struct:    16  208
     /// ```
     ///

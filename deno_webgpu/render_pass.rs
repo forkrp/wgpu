@@ -483,9 +483,9 @@ pub(crate) struct GPURenderPassDescriptor {
   pub depth_stencil_attachment: Option<GPURenderPassDepthStencilAttachment>,
   pub occlusion_query_set: Option<Ptr<crate::query_set::GPUQuerySet>>,
   pub timestamp_writes: Option<GPURenderPassTimestampWrites>,
-  /*#[webidl(default = 50000000)]
+  #[webidl(default = 50000000)]
   #[options(enforce_range = true)]
-  pub max_draw_count: u64,*/
+  pub max_draw_count: u64,
   #[webidl(default = 0)]
   #[options(enforce_range = true)]
   pub multiview_mask: u32,

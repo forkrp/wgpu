@@ -65,15 +65,6 @@ impl GPUTexture {
           .instance
           .texture_create_view(self.id, &Default::default(), None);
       if let Some(err) = err {
-        use wgpu_types::error::WebGpuError;
-        assert_ne!(
-          err.webgpu_error_type(),
-          wgpu_types::error::ErrorType::Validation,
-          concat!(
-            "getting default view for a texture ",
-            "caused a validation error (!?)"
-          )
-        );
         self.error_handler.push_error(Some(err));
       }
       id

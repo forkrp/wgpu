@@ -777,6 +777,7 @@ pub(super) fn encode_compute_pass(
         };
 
     let hal_desc = hal::ComputePassDescriptor {
+        is_empty: base.commands.is_empty(),
         label: hal_label(base.label.as_deref(), device.instance_flags),
         timestamp_writes,
     };

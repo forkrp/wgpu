@@ -139,6 +139,7 @@ async fn barycentric(ctx: TestingContext, no_perspective: bool) {
         .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
     {
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            max_draw_count: None,
             label: None,
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 ops: wgpu::Operations {

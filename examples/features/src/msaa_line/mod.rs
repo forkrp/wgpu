@@ -303,6 +303,7 @@ impl crate::framework::Example for Example {
 
             encoder
                 .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    max_draw_count: None,
                     label: None,
                     color_attachments: &[Some(rpass_color_attachment)],
                     depth_stencil_attachment: None,

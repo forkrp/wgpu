@@ -1,0 +1,4 @@
+targets = "METAL"
+
+[msl_pipeline]
+sample_mask = 2

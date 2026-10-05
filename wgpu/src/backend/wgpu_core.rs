@@ -549,6 +549,7 @@ pub struct CoreCommandBuffer {
 pub struct CoreRenderBundleEncoder {
     pub(crate) context: ContextWgpuCore,
     encoder: Box<wgc::command::RenderBundleEncoder>,
+    error_sink: ErrorSink,
     id: crate::cmp::Identifier,
 }
 
@@ -581,6 +582,7 @@ pub struct CoreRenderPipeline {
 
 #[derive(Debug)]
 pub struct CoreComputePass {
+    abandoned: bool,
     pub(crate) context: ContextWgpuCore,
     pass: wgc::command::ComputePass,
     error_sink: ErrorSink,
@@ -589,6 +591,7 @@ pub struct CoreComputePass {
 
 #[derive(Debug)]
 pub struct CoreRenderPass {
+    abandoned: bool,
     pub(crate) context: ContextWgpuCore,
     pass: wgc::command::RenderPass,
     error_sink: ErrorSink,
@@ -1826,6 +1829,7 @@ impl dispatch::DeviceInterface for CoreDevice {
         CoreRenderBundleEncoder {
             context: self.context.clone(),
             encoder,
+            error_sink: self.error_sink.clone(),
             id: crate::cmp::Identifier::create(),
         }
         .into()
@@ -2593,6 +2597,7 @@ impl dispatch::CommandEncoderInterface for CoreCommandEncoder {
         }
 
         CoreComputePass {
+            abandoned: false,
             context: self.context.clone(),
             pass,
             error_sink: self.error_sink.clone(),
@@ -2646,6 +2651,7 @@ impl dispatch::CommandEncoderInterface for CoreCommandEncoder {
                 depth_stencil_attachment: depth_stencil,
                 occlusion_query_set: desc.occlusion_query_set.map(|qs| qs.inner.as_core().id),
                 multiview_mask: desc.multiview_mask,
+                max_draw_count: desc.max_draw_count,
             },
         );
 
@@ -2659,6 +2665,7 @@ impl dispatch::CommandEncoderInterface for CoreCommandEncoder {
         }
 
         CoreRenderPass {
+            abandoned: false,
             context: self.context.clone(),
             pass,
             error_sink: self.error_sink.clone(),
@@ -2952,6 +2959,9 @@ impl Drop for CoreCommandBuffer {
 }
 
 impl dispatch::ComputePassInterface for CoreComputePass {
+    fn abandon(&mut self) {
+        self.abandoned = true;
+    }
     fn set_pipeline(&mut self, pipeline: &dispatch::DispatchComputePipeline) {
         let pipeline = pipeline.as_core();
 
@@ -3171,6 +3181,9 @@ impl dispatch::ComputePassInterface for CoreComputePass {
 
 impl Drop for CoreComputePass {
     fn drop(&mut self) {
+        if self.abandoned {
+            return;
+        }
         if let Err(cause) = self.context.0.compute_pass_end(&mut self.pass) {
             self.context.handle_error(
                 &self.error_sink,
@@ -3183,6 +3196,9 @@ impl Drop for CoreComputePass {
 }
 
 impl dispatch::RenderPassInterface for CoreRenderPass {
+    fn abandon(&mut self) {
+        self.abandoned = true;
+    }
     fn set_pipeline(&mut self, pipeline: &dispatch::DispatchRenderPipeline) {
         let pipeline = pipeline.as_core();
 
@@ -3227,11 +3243,11 @@ impl dispatch::RenderPassInterface for CoreRenderPass {
         buffer: &dispatch::DispatchBuffer,
         index_format: crate::IndexFormat,
         offset: crate::BufferAddress,
-        size: Option<crate::BufferSize>,
+        size: Option<crate::BufferAddress>,
     ) {
         let buffer = buffer.as_core();
 
-        if let Err(cause) = self.context.0.render_pass_set_index_buffer(
+        if let Err(cause) = self.context.0.render_pass_set_index_buffer_range(
             &mut self.pass,
             buffer.id,
             index_format,
@@ -3252,15 +3268,17 @@ impl dispatch::RenderPassInterface for CoreRenderPass {
         slot: u32,
         buffer: Option<&dispatch::DispatchBuffer>,
         offset: crate::BufferAddress,
-        size: Option<crate::BufferSize>,
+        size: Option<crate::BufferAddress>,
     ) {
         let buffer = buffer.map(|buffer| buffer.as_core().id);
 
-        if let Err(cause) =
-            self.context
-                .0
-                .render_pass_set_vertex_buffer(&mut self.pass, slot, buffer, offset, size)
-        {
+        if let Err(cause) = self.context.0.render_pass_set_vertex_buffer_range(
+            &mut self.pass,
+            slot,
+            buffer,
+            offset,
+            size,
+        ) {
             self.context.handle_error(
                 &self.error_sink,
                 cause,
@@ -3358,12 +3376,37 @@ impl dispatch::RenderPassInterface for CoreRenderPass {
     }
 
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
-        if let Err(cause) = self.context.0.render_pass_draw(
-            &mut self.pass,
+        self.draw_counted(
             vertices.end - vertices.start,
             instances.end - instances.start,
             vertices.start,
             instances.start,
+        );
+    }
+
+    fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
+        self.draw_indexed_counted(
+            indices.end - indices.start,
+            instances.end - instances.start,
+            indices.start,
+            base_vertex,
+            instances.start,
+        );
+    }
+
+    fn draw_counted(
+        &mut self,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    ) {
+        if let Err(cause) = self.context.0.render_pass_draw(
+            &mut self.pass,
+            vertex_count,
+            instance_count,
+            first_vertex,
+            first_instance,
         ) {
             self.context.handle_error(
                 &self.error_sink,
@@ -3374,14 +3417,21 @@ impl dispatch::RenderPassInterface for CoreRenderPass {
         }
     }
 
-    fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
+    fn draw_indexed_counted(
+        &mut self,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        base_vertex: i32,
+        first_instance: u32,
+    ) {
         if let Err(cause) = self.context.0.render_pass_draw_indexed(
             &mut self.pass,
-            indices.end - indices.start,
-            instances.end - instances.start,
-            indices.start,
+            index_count,
+            instance_count,
+            first_index,
             base_vertex,
-            instances.start,
+            first_instance,
         ) {
             self.context.handle_error(
                 &self.error_sink,
@@ -3780,6 +3830,9 @@ impl dispatch::RenderPassInterface for CoreRenderPass {
 
 impl Drop for CoreRenderPass {
     fn drop(&mut self) {
+        if self.abandoned {
+            return;
+        }
         if let Err(cause) = self.context.0.render_pass_end(&mut self.pass) {
             self.context.handle_error(
                 &self.error_sink,
@@ -3820,13 +3873,13 @@ impl dispatch::RenderBundleEncoderInterface for CoreRenderBundleEncoder {
         buffer: &dispatch::DispatchBuffer,
         index_format: crate::IndexFormat,
         offset: crate::BufferAddress,
-        size: Option<crate::BufferSize>,
+        size: Option<crate::BufferAddress>,
     ) {
         let buffer = buffer.as_core();
 
         self.context
             .0
-            .render_bundle_encoder_set_index_buffer(
+            .render_bundle_encoder_set_index_buffer_range(
                 &mut self.encoder,
                 buffer.id,
                 index_format,
@@ -3841,13 +3894,19 @@ impl dispatch::RenderBundleEncoderInterface for CoreRenderBundleEncoder {
         slot: u32,
         buffer: Option<&dispatch::DispatchBuffer>,
         offset: crate::BufferAddress,
-        size: Option<crate::BufferSize>,
+        size: Option<crate::BufferAddress>,
     ) {
         let buffer = buffer.map(|buffer| buffer.as_core().id);
 
         self.context
             .0
-            .render_bundle_encoder_set_vertex_buffer(&mut self.encoder, slot, buffer, offset, size)
+            .render_bundle_encoder_set_vertex_buffer_range(
+                &mut self.encoder,
+                slot,
+                buffer,
+                offset,
+                size,
+            )
             .expect("RenderBundleEncoder should not have ended");
     }
 
@@ -3859,28 +3918,60 @@ impl dispatch::RenderBundleEncoderInterface for CoreRenderBundleEncoder {
     }
 
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
+        self.draw_counted(
+            vertices.end - vertices.start,
+            instances.end - instances.start,
+            vertices.start,
+            instances.start,
+        );
+    }
+
+    fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
+        self.draw_indexed_counted(
+            indices.end - indices.start,
+            instances.end - instances.start,
+            indices.start,
+            base_vertex,
+            instances.start,
+        );
+    }
+
+    fn draw_counted(
+        &mut self,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    ) {
         self.context
             .0
             .render_bundle_encoder_draw(
                 &mut self.encoder,
-                vertices.end - vertices.start,
-                instances.end - instances.start,
-                vertices.start,
-                instances.start,
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
             )
             .expect("RenderBundleEncoder should not have ended");
     }
 
-    fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
+    fn draw_indexed_counted(
+        &mut self,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        base_vertex: i32,
+        first_instance: u32,
+    ) {
         self.context
             .0
             .render_bundle_encoder_draw_indexed(
                 &mut self.encoder,
-                indices.end - indices.start,
-                instances.end - instances.start,
-                indices.start,
+                index_count,
+                instance_count,
+                first_index,
                 base_vertex,
-                instances.start,
+                first_instance,
             )
             .expect("RenderBundleEncoder should not have ended");
     }
@@ -3929,8 +4020,12 @@ impl dispatch::RenderBundleEncoderInterface for CoreRenderBundleEncoder {
             None,
         );
         if let Some(err) = error {
-            self.context
-                .handle_error_fatal(err, "RenderBundleEncoder::finish");
+            self.context.handle_error(
+                &self.error_sink,
+                err,
+                desc.label,
+                "RenderBundleEncoder::finish",
+            );
         }
         CoreRenderBundle {
             context: self.context.clone(),

@@ -10,18 +10,23 @@ use crate::TextureFormat;
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum ExternalTextureFormat {
-    /// Single [`TextureFormat::Rgba8Unorm`] or [`TextureFormat::Bgra8Unorm`] format plane.
+    /// Single filterable RGBA plane with unpremultiplied alpha.
     Rgba,
     /// [`TextureFormat::R8Unorm`] Y plane, and [`TextureFormat::Rg8Unorm`]
     /// interleaved CbCr plane.
     Nv12,
     /// Separate [`TextureFormat::R8Unorm`] Y, Cb, and Cr planes.
     Yu12,
+    /// Single filterable RGBA plane with premultiplied alpha. Sampling and loads
+    /// unpremultiply before color conversion and preserve the alpha component.
+    RgbaPremultiplied,
 }
 
 /// Parameters describing a gamma encoding transfer function in the form
 /// tf = { k * linear                   | linear < b
 ///      { a * pow(linear, 1/g) - (a-1) | linear >= b
+/// Negative inputs use the sign-preserving extension of the function on their
+/// absolute values.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Zeroable, bytemuck::Pod)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -81,7 +86,7 @@ pub struct ExternalTextureDescriptor<L> {
 
     /// 4x4 column-major matrix with which to convert sampled YCbCr values
     /// to RGBA.
-    /// This is ignored when `format` is [`ExternalTextureFormat::Rgba`].
+    /// This is ignored for single-plane RGBA formats.
     pub yuv_conversion_matrix: [f32; 16],
 
     /// 3x3 column-major matrix to transform linear RGB values in the source
@@ -162,7 +167,7 @@ impl<L> ExternalTextureDescriptor<L> {
     /// The number of underlying planes used by the external texture.
     pub fn num_planes(&self) -> usize {
         match self.format {
-            ExternalTextureFormat::Rgba => 1,
+            ExternalTextureFormat::Rgba | ExternalTextureFormat::RgbaPremultiplied => 1,
             ExternalTextureFormat::Nv12 => 2,
             ExternalTextureFormat::Yu12 => 3,
         }

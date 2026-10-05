@@ -80,6 +80,7 @@ async fn scissor_test_impl(
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                max_draw_count: None,
                 label: Some("Renderpass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &texture_view,

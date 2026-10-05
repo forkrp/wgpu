@@ -145,6 +145,7 @@ impl GPUDevice {
       .push_error(Some(GPUError::Lost(GPUDeviceLostReason::Destroyed)));
   }
 
+  #[reentrant]
   #[required(1)]
   #[cppgc]
   fn create_buffer(

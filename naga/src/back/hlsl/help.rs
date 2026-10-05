@@ -265,13 +265,6 @@ impl<W: Write> super::Writer<'_, W> {
         Ok(())
     }
 
-    /// Helper function used by [`Self::write_wrapped_image_load_function`] and
-    /// [`Self::write_wrapped_image_sample_function`] to write the shared YUV
-    /// to RGB conversion code for external textures. Expects the preceding
-    /// code to declare the Y component as a `float` variable of name `y`, the
-    /// UV components as a `float2` variable of name `uv`, and the external
-    /// texture params as a variable of name `params`. The emitted code will
-    /// return the result.
     fn write_convert_yuv_to_rgb_and_return(
         &mut self,
         level: crate::back::Level,
@@ -279,44 +272,70 @@ impl<W: Write> super::Writer<'_, W> {
         uv: &str,
         params: &str,
     ) -> BackendResult {
+        self.write_convert_rgba_and_return(
+            level,
+            &format!(
+                "float4(mul(float4({y}, {uv}, 1.0), {params}.yuv_conversion_matrix).rgb, 1.0)"
+            ),
+            params,
+        )
+    }
+
+    fn write_convert_rgba_and_return(
+        &mut self,
+        level: crate::back::Level,
+        rgba: &str,
+        params: &str,
+    ) -> BackendResult {
         let l1 = level;
         let l2 = l1.next();
-
-        // Convert from YUV to non-linear RGB in the source color space. We
-        // declare our matrices as row_major in HLSL, therefore we must reverse
-        // the order of this multiplication
+        writeln!(self.out, "{l1}float4 rgba = {rgba};")?;
+        writeln!(self.out, "{l1}if ({params}.is_premultiplied != 0u) {{")?;
         writeln!(
             self.out,
-            "{l1}float3 srcGammaRgb = mul(float4({y}, {uv}, 1.0), {params}.yuv_conversion_matrix).rgb;"
+            "{l2}rgba.rgb = rgba.a == 0.0 ? float3(0.0, 0.0, 0.0) : rgba.rgb / rgba.a;"
         )?;
-
-        // Apply the inverse of the source transfer function to convert to
-        // linear RGB in the source color space.
+        writeln!(self.out, "{l1}}}")?;
+        writeln!(self.out, "{l1}float3 srcGammaRgb = rgba.rgb;")?;
+        writeln!(self.out, "{l1}if ({params}.src_tf.a == 1.0 && {params}.src_tf.g == 1.0 && {params}.src_tf.k == 1.0 &&")?;
+        writeln!(self.out, "{l2}{params}.dst_tf.a == 1.0 && {params}.dst_tf.g == 1.0 && {params}.dst_tf.k == 1.0 &&")?;
         writeln!(
             self.out,
-            "{l1}float3 srcLinearRgb = srcGammaRgb < {params}.src_tf.k * {params}.src_tf.b ?"
+            "{l2}all({params}.gamut_conversion_matrix[0] == float3(1.0, 0.0, 0.0)) &&"
         )?;
-        writeln!(self.out, "{l2}srcGammaRgb / {params}.src_tf.k :")?;
-        writeln!(self.out, "{l2}pow((srcGammaRgb + {params}.src_tf.a - 1.0) / {params}.src_tf.a, {params}.src_tf.g);")?;
-
-        // Multiply by the gamut conversion matrix to convert to linear RGB in
-        // the destination color space. We declare our matrices as row_major in
-        // HLSL, therefore we must reverse the order of this multiplication.
+        writeln!(
+            self.out,
+            "{l2}all({params}.gamut_conversion_matrix[1] == float3(0.0, 1.0, 0.0)) &&"
+        )?;
+        writeln!(
+            self.out,
+            "{l2}all({params}.gamut_conversion_matrix[2] == float3(0.0, 0.0, 1.0))) return rgba;"
+        )?;
+        writeln!(self.out, "{l1}float3 srcAbs = abs(srcGammaRgb);")?;
+        writeln!(
+            self.out,
+            "{l1}float3 srcSign = srcGammaRgb < 0.0 ? -1.0 : 1.0;"
+        )?;
+        writeln!(
+            self.out,
+            "{l1}float3 srcLinearRgb = srcSign * (srcAbs < {params}.src_tf.k * {params}.src_tf.b ?"
+        )?;
+        writeln!(self.out, "{l2}srcAbs / {params}.src_tf.k : pow((srcAbs + {params}.src_tf.a - 1.0) / {params}.src_tf.a, {params}.src_tf.g));")?;
         writeln!(
             self.out,
             "{l1}float3 dstLinearRgb = mul(srcLinearRgb, {params}.gamut_conversion_matrix);"
         )?;
-
-        // Finally, apply the dest transfer function to convert to non-linear
-        // RGB in the destination color space, and return the result.
+        writeln!(self.out, "{l1}float3 dstAbs = abs(dstLinearRgb);")?;
         writeln!(
             self.out,
-            "{l1}float3 dstGammaRgb = dstLinearRgb < {params}.dst_tf.b ?"
+            "{l1}float3 dstSign = dstLinearRgb < 0.0 ? -1.0 : 1.0;"
         )?;
-        writeln!(self.out, "{l2}{params}.dst_tf.k * dstLinearRgb :")?;
-        writeln!(self.out, "{l2}{params}.dst_tf.a * pow(dstLinearRgb, 1.0 / {params}.dst_tf.g) - ({params}.dst_tf.a - 1);")?;
-
-        writeln!(self.out, "{l1}return float4(dstGammaRgb, 1.0);")?;
+        writeln!(
+            self.out,
+            "{l1}float3 dstGammaRgb = dstSign * (dstAbs < {params}.dst_tf.b ?"
+        )?;
+        writeln!(self.out, "{l2}{params}.dst_tf.k * dstAbs : {params}.dst_tf.a * pow(dstAbs, 1.0 / {params}.dst_tf.g) - ({params}.dst_tf.a - 1.0));")?;
+        writeln!(self.out, "{l1}return float4(dstGammaRgb, rgba.a);")?;
         Ok(())
     }
 
@@ -363,10 +382,10 @@ impl<W: Write> super::Writer<'_, W> {
                 writeln!(self.out, "{l1});")?;
                 writeln!(self.out, "{l1}uint2 plane0_coords = uint2(round(mul(float3(coords, 1.0), load_transform)));")?;
                 writeln!(self.out, "{l1}if (params.num_planes == 1u) {{")?;
-                // For single plane, simply read from plane0
-                writeln!(
-                    self.out,
-                    "{l2}return plane0.Load(uint3(plane0_coords, 0u));"
+                self.write_convert_rgba_and_return(
+                    l2,
+                    "plane0.Load(uint3(plane0_coords, 0u))",
+                    "params",
                 )?;
                 writeln!(self.out, "{l1}}} else {{")?;
 
@@ -481,10 +500,10 @@ impl<W: Write> super::Writer<'_, W> {
                     "{l1}float2 plane0_coords = clamp(coords, bounds.xy + plane0_half_texel, bounds.zw - plane0_half_texel);"
                 )?;
                 writeln!(self.out, "{l1}if (params.num_planes == 1u) {{")?;
-                // For single plane, simply sample from plane0
-                writeln!(
-                    self.out,
-                    "{l2}return plane0.SampleLevel(samp, plane0_coords, 0.0f);"
+                self.write_convert_rgba_and_return(
+                    l2,
+                    "plane0.SampleLevel(samp, plane0_coords, 0.0f)",
+                    "params",
                 )?;
                 writeln!(self.out, "{l1}}} else {{")?;
 

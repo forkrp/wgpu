@@ -191,6 +191,7 @@ impl crate::framework::Example for Example {
         {
             let depth_view = self.stencil_buffer.create_view(&Default::default());
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                max_draw_count: None,
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,

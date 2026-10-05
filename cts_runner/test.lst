@@ -34,6 +34,8 @@ fails-if(dx12) webgpu:api,operation,command_buffer,image_copy:undefined_params:i
 webgpu:api,operation,command_buffer,image_copy:undefined_params:initMethod="WriteTexture";checkMethod="PartialCopyT2B";dimension="3d"
 // https://github.com/gfx-rs/wgpu/issues/8556
 fails-if(dx12) webgpu:api,operation,command_buffer,programmable,immediate:*
+webgpu:api,operation,command_buffer,queries,occlusionQuery:*
+webgpu:api,operation,command_buffer,queries,timestampQuery:*
 webgpu:api,operation,compute_pipeline,overrides:*
 //FAIL: webgpu:api,operation,compute,basic:large_dispatch:*
 webgpu:api,operation,compute,basic:memcpy:*
@@ -92,12 +94,15 @@ webgpu:api,validation,capability_checks,limits,minUniformBufferOffsetAlignment:v
 webgpu:api,validation,compute_pipeline:basic:*
 webgpu:api,validation,compute_pipeline:limits,invocations_per_workgroup,each_component:*
 webgpu:api,validation,compute_pipeline:limits,invocations_per_workgroup:*
+webgpu:api,validation,compute_pipeline:limits,workgroup_storage_size:*
 webgpu:api,validation,compute_pipeline:overrides,entry_point,validation_error:*
 webgpu:api,validation,compute_pipeline:overrides,identifier:*
 webgpu:api,validation,compute_pipeline:overrides,uninitialized:*
 webgpu:api,validation,compute_pipeline:overrides,value,type_error:*
 webgpu:api,validation,compute_pipeline:overrides,value,validation_error,f16:*
 webgpu:api,validation,compute_pipeline:overrides,value,validation_error:*
+webgpu:api,validation,compute_pipeline:overrides,workgroup_size,limits,workgroup_storage_size:*
+webgpu:api,validation,compute_pipeline:overrides,workgroup_size,limits:*
 webgpu:api,validation,compute_pipeline:overrides,workgroup_size:*
 webgpu:api,validation,compute_pipeline:pipeline_layout,device_mismatch:*
 webgpu:api,validation,compute_pipeline:resource_compatibility:*
@@ -168,14 +173,9 @@ webgpu:api,validation,encoding,cmds,debug:debug_group_balanced:encoderType="rend
 webgpu:api,validation,encoding,cmds,debug:debug_group:*
 webgpu:api,validation,encoding,cmds,debug:debug_marker:*
 webgpu:api,validation,encoding,cmds,index_access:*
-webgpu:api,validation,encoding,cmds,render,draw:buffer_binding_overlap:*
-webgpu:api,validation,encoding,cmds,render,draw:index_buffer_OOB:*
-webgpu:api,validation,encoding,cmds,render,draw:unused_buffer_bound:*
-webgpu:api,validation,encoding,cmds,render,draw:vertex_buffer_OOB:*
+webgpu:api,validation,encoding,cmds,render,draw:*
 webgpu:api,validation,encoding,cmds,render,dynamic_state:*
-webgpu:api,validation,encoding,cmds,render,indirect_draw:indirect_buffer_state:*
-webgpu:api,validation,encoding,cmds,render,indirect_draw:indirect_buffer_usage:*
-webgpu:api,validation,encoding,cmds,render,indirect_draw:indirect_buffer,device_mismatch:*
+webgpu:api,validation,encoding,cmds,render,indirect_draw:*
 webgpu:api,validation,encoding,cmds,render,setIndexBuffer:*
 webgpu:api,validation,encoding,cmds,render,setPipeline:*
 webgpu:api,validation,encoding,cmds,render,setVertexBuffer:*

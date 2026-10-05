@@ -42,6 +42,58 @@ Bottom level categories:
 
 ## Unreleased
 
+### Bug Fixes
+
+#### naga
+
+- Apply fixed fragment sample masks in Metal shader output, intersecting shader
+  sample masks and supporting fragment entry points without color outputs.
+- Apply external RGBA texture color-conversion metadata in Metal and HLSL,
+  preserving alpha and extended negative values through transfer functions.
+
+#### Validation
+
+- Preserve render-pass stencil references when executing render bundles.
+- Validate render-pass draw limits, including draws recorded in executed bundles,
+  and reject misaligned or out-of-bounds render-bundle indirect arguments.
+- Add explicit-count render-pass and render-bundle draw entry points for WebGPU
+  bindings that must preserve the entire u32 offset/count domain.
+- Validate compute workgroup storage and specialized workgroup sizes against
+  negotiated device limits before driver compilation.
+- Report render-bundle validation failures through the device error handler and
+  return an invalid bundle instead of panicking at `RenderBundleEncoder::finish`.
+- Accept zero-length vertex and index slices and retain their exact logical range
+  through render-pass and render-bundle validation.
+- Validate texture views and bind groups built from destroyed resources without
+  allocating replacement resources; report destroyed state when they are used.
+- Deno reports default-view validation errors when a texture is used directly
+  as a binding resource, instead of aborting the process on an invalid texture.
+
+#### Metal
+
+- HAL render/compute pass descriptors accept an is_empty hint; callers setting it
+  must encode no commands within the pass.
+- Defer empty-pass driver encoding until submission and batch it to preserve
+  progress for large timestamp recordings within the command-buffer budget.
+- Roll back exhausted command-buffer reservations and report out of memory.
+- Suballocate timestamp query samples in shared counter pages, allowing many
+  query sets without allocating one of Metal's limited counter buffers per set.
+
+#### deno_webgpu
+
+- Allow createBuffer descriptor getters to reenter native WebGPU operations.
+
+### Changes
+
+- Add `ExternalTextureFormat::RgbaPremultiplied` for single RGBA planes whose
+  alpha must be removed in shader precision before color conversion.
+
+- Custom dispatch implementations receive vertex and index binding sizes as
+  `Option<BufferAddress>`, preserving an explicit zero-length range.
+- Compute/render passes provide `abandon()` for bindings that must discard an
+  open pass without implicitly ending it. Custom pass dispatch implementations
+  implement the corresponding method.
+
 ## v30.0.1 (2026-08-21)
 
 ### Bug Fixes

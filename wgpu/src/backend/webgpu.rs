@@ -1456,6 +1456,7 @@ pub struct WebCommandEncoder {
 
 #[derive(Debug)]
 pub struct WebComputePassEncoder {
+    abandoned: bool,
     pub(crate) inner: webgpu_sys::GpuComputePassEncoder,
     /// Unique identifier for this ComputePassEncoder.
     ident: crate::cmp::Identifier,
@@ -1463,6 +1464,7 @@ pub struct WebComputePassEncoder {
 
 #[derive(Debug)]
 pub struct WebRenderPassEncoder {
+    abandoned: bool,
     pub(crate) inner: webgpu_sys::GpuRenderPassEncoder,
     /// Unique identifier for this RenderPassEncoder.
     ident: crate::cmp::Identifier,
@@ -3216,6 +3218,7 @@ impl dispatch::CommandEncoderInterface for WebCommandEncoder {
         let compute_pass = self.inner.begin_compute_pass_with_descriptor(&mapped_desc);
 
         WebComputePassEncoder {
+            abandoned: false,
             inner: compute_pass,
             ident: crate::cmp::Identifier::create(),
         }
@@ -3271,6 +3274,9 @@ impl dispatch::CommandEncoderInterface for WebCommandEncoder {
             .collect::<Vec<js_sys::JsNullable<webgpu_sys::GpuRenderPassColorAttachment>>>();
 
         let mapped_desc = webgpu_sys::GpuRenderPassDescriptor::new(&mapped_color_attachments);
+        if let Some(max_draw_count) = desc.max_draw_count {
+            mapped_desc.set_max_draw_count_f64(max_draw_count as f64);
+        }
 
         if let Some(label) = desc.label {
             mapped_desc.set_label(label);
@@ -3334,6 +3340,7 @@ impl dispatch::CommandEncoderInterface for WebCommandEncoder {
         let render_pass = self.inner.begin_render_pass(&mapped_desc).unwrap();
 
         WebRenderPassEncoder {
+            abandoned: false,
             inner: render_pass,
             ident: crate::cmp::Identifier::create(),
         }
@@ -3469,6 +3476,9 @@ impl Drop for WebPipelineCache {
 }
 
 impl dispatch::ComputePassInterface for WebComputePassEncoder {
+    fn abandon(&mut self) {
+        self.abandoned = true;
+    }
     fn set_pipeline(&mut self, pipeline: &dispatch::DispatchComputePipeline) {
         let pipeline = &pipeline.as_webgpu().inner;
         self.inner.set_pipeline(pipeline);
@@ -3559,11 +3569,17 @@ impl dispatch::ComputePassInterface for WebComputePassEncoder {
 }
 impl Drop for WebComputePassEncoder {
     fn drop(&mut self) {
+        if self.abandoned {
+            return;
+        }
         self.inner.end();
     }
 }
 
 impl dispatch::RenderPassInterface for WebRenderPassEncoder {
+    fn abandon(&mut self) {
+        self.abandoned = true;
+    }
     fn set_pipeline(&mut self, pipeline: &dispatch::DispatchRenderPipeline) {
         let pipeline = &pipeline.as_webgpu().inner;
 
@@ -3598,7 +3614,7 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         buffer: &dispatch::DispatchBuffer,
         index_format: crate::IndexFormat,
         offset: crate::BufferAddress,
-        size: Option<crate::BufferSize>,
+        size: Option<crate::BufferAddress>,
     ) {
         let buffer = buffer.as_webgpu();
         let index_format = map_index_format(index_format);
@@ -3608,7 +3624,7 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
                 &buffer.inner,
                 index_format,
                 offset as f64,
-                size.get() as f64,
+                size as f64,
             );
         } else {
             self.inner
@@ -3621,17 +3637,13 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
         slot: u32,
         buffer: Option<&dispatch::DispatchBuffer>,
         offset: crate::BufferAddress,
-        size: Option<crate::BufferSize>,
+        size: Option<crate::BufferAddress>,
     ) {
         let buffer = buffer.map(|buffer| &buffer.as_webgpu().inner);
 
         if let Some(size) = size {
-            self.inner.set_vertex_buffer_with_f64_and_f64(
-                slot,
-                buffer,
-                offset as f64,
-                size.get() as f64,
-            );
+            self.inner
+                .set_vertex_buffer_with_f64_and_f64(slot, buffer, offset as f64, size as f64);
         } else {
             self.inner
                 .set_vertex_buffer_with_f64(slot, buffer, offset as f64);
@@ -3670,23 +3682,55 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
     }
 
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
-        self.inner
-            .draw_with_instance_count_and_first_vertex_and_first_instance(
-                vertices.end - vertices.start,
-                instances.end - instances.start,
-                vertices.start,
-                instances.start,
-            );
+        self.draw_counted(
+            vertices.end - vertices.start,
+            instances.end - instances.start,
+            vertices.start,
+            instances.start,
+        );
     }
 
     fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
+        self.draw_indexed_counted(
+            indices.end - indices.start,
+            instances.end - instances.start,
+            indices.start,
+            base_vertex,
+            instances.start,
+        );
+    }
+
+    fn draw_counted(
+        &mut self,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    ) {
+        self.inner
+            .draw_with_instance_count_and_first_vertex_and_first_instance(
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            );
+    }
+
+    fn draw_indexed_counted(
+        &mut self,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        base_vertex: i32,
+        first_instance: u32,
+    ) {
         self.inner
             .draw_indexed_with_instance_count_and_first_index_and_base_vertex_and_first_instance(
-                indices.end - indices.start,
-                instances.end - instances.start,
-                indices.start,
+                index_count,
+                instance_count,
+                first_index,
                 base_vertex,
-                instances.start,
+                first_instance,
             )
     }
 
@@ -3844,6 +3888,9 @@ impl dispatch::RenderPassInterface for WebRenderPassEncoder {
 }
 impl Drop for WebRenderPassEncoder {
     fn drop(&mut self) {
+        if self.abandoned {
+            return;
+        }
         self.inner.end();
     }
 }
@@ -3889,7 +3936,7 @@ impl dispatch::RenderBundleEncoderInterface for WebRenderBundleEncoder {
         buffer: &dispatch::DispatchBuffer,
         index_format: crate::IndexFormat,
         offset: crate::BufferAddress,
-        size: Option<crate::BufferSize>,
+        size: Option<crate::BufferAddress>,
     ) {
         let buffer = buffer.as_webgpu();
         let index_format = map_index_format(index_format);
@@ -3899,7 +3946,7 @@ impl dispatch::RenderBundleEncoderInterface for WebRenderBundleEncoder {
                 &buffer.inner,
                 index_format,
                 offset as f64,
-                size.get() as f64,
+                size as f64,
             );
         } else {
             self.inner
@@ -3912,17 +3959,13 @@ impl dispatch::RenderBundleEncoderInterface for WebRenderBundleEncoder {
         slot: u32,
         buffer: Option<&dispatch::DispatchBuffer>,
         offset: crate::BufferAddress,
-        size: Option<crate::BufferSize>,
+        size: Option<crate::BufferAddress>,
     ) {
         let buffer = buffer.map(|buffer| &buffer.as_webgpu().inner);
 
         if let Some(size) = size {
-            self.inner.set_vertex_buffer_with_f64_and_f64(
-                slot,
-                buffer,
-                offset as f64,
-                size.get() as f64,
-            );
+            self.inner
+                .set_vertex_buffer_with_f64_and_f64(slot, buffer, offset as f64, size as f64);
         } else {
             self.inner
                 .set_vertex_buffer_with_f64(slot, buffer, offset as f64);
@@ -3934,23 +3977,55 @@ impl dispatch::RenderBundleEncoderInterface for WebRenderBundleEncoder {
     }
 
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
-        self.inner
-            .draw_with_instance_count_and_first_vertex_and_first_instance(
-                vertices.end - vertices.start,
-                instances.end - instances.start,
-                vertices.start,
-                instances.start,
-            );
+        self.draw_counted(
+            vertices.end - vertices.start,
+            instances.end - instances.start,
+            vertices.start,
+            instances.start,
+        );
     }
 
     fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
+        self.draw_indexed_counted(
+            indices.end - indices.start,
+            instances.end - instances.start,
+            indices.start,
+            base_vertex,
+            instances.start,
+        );
+    }
+
+    fn draw_counted(
+        &mut self,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    ) {
+        self.inner
+            .draw_with_instance_count_and_first_vertex_and_first_instance(
+                vertex_count,
+                instance_count,
+                first_vertex,
+                first_instance,
+            );
+    }
+
+    fn draw_indexed_counted(
+        &mut self,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        base_vertex: i32,
+        first_instance: u32,
+    ) {
         self.inner
             .draw_indexed_with_instance_count_and_first_index_and_base_vertex_and_first_instance(
-                indices.end - indices.start,
-                instances.end - instances.start,
-                indices.start,
+                index_count,
+                instance_count,
+                first_index,
                 base_vertex,
-                instances.start,
+                first_instance,
             )
     }
 

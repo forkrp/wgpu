@@ -664,6 +664,7 @@ fn transient_invalid_storeop() {
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
             let invalid_render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                max_draw_count: None,
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &transient_texture.create_view(&wgpu::TextureViewDescriptor::default()),

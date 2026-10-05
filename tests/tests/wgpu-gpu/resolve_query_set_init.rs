@@ -81,6 +81,7 @@ static USED_EMPTY_OCCLUSION_RESOLVES_TO_ZERO: GpuTestConfiguration = GpuTestConf
             .create_command_encoder(&CommandEncoderDescriptor::default());
         {
             let mut pass = enc.begin_render_pass(&RenderPassDescriptor {
+                max_draw_count: None,
                 label: None,
                 color_attachments: &[Some(RenderPassColorAttachment {
                     view: &view,
@@ -531,6 +532,7 @@ fn write_occlusion_query(
     slot: u32,
 ) {
     let mut pass = enc.begin_render_pass(&RenderPassDescriptor {
+        max_draw_count: None,
         label: None,
         color_attachments: &[Some(RenderPassColorAttachment {
             view,

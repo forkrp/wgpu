@@ -94,6 +94,7 @@ fn test_planar_texture_creation_sampling(
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
     let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        max_draw_count: None,
         label: None,
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             ops: wgpu::Operations::default(),
@@ -184,6 +185,7 @@ fn test_planar_texture_rendering(
 
     {
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            max_draw_count: None,
             label: None,
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 ops: wgpu::Operations::default(),
@@ -201,6 +203,7 @@ fn test_planar_texture_rendering(
     }
     {
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            max_draw_count: None,
             label: None,
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 ops: wgpu::Operations::default(),

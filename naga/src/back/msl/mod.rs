@@ -414,6 +414,8 @@ pub struct PipelineOptions {
     ///
     /// Enable this for vertex/mesh shaders with point primitive topologies.
     pub allow_and_force_point_size: bool,
+    /// Fixed fragment coverage mask, intersected with any shader sample-mask output.
+    pub sample_mask: Option<u32>,
 
     /// If set, when generating the Metal vertex shader, transform it
     /// to receive the vertex buffers, lengths, and vertex id as args,

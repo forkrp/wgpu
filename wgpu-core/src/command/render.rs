@@ -271,6 +271,8 @@ pub struct RenderPassDescriptor<'a> {
     pub occlusion_query_set: Option<id::QuerySetId>,
     /// The multiview array layers that will be used
     pub multiview_mask: Option<NonZeroU32>,
+    /// Optional upper bound on draw calls, including executed bundles.
+    pub max_draw_count: Option<u64>,
 }
 
 /// Describes the attachments of a render pass.
@@ -287,6 +289,8 @@ pub struct ResolvedRenderPassDescriptor<'a> {
     pub occlusion_query_set: Option<Fallible<QuerySet>>,
     /// The multiview array layers that will be used
     pub multiview_mask: Option<NonZeroU32>,
+    /// Optional upper bound on draw calls, including executed bundles.
+    pub max_draw_count: Option<u64>,
 }
 
 /// Describes the attachments of a render pass.
@@ -304,6 +308,8 @@ struct ArcRenderPassDescriptor<'a> {
     pub occlusion_query_set: Option<Arc<QuerySet>>,
     /// The multiview array layers that will be used
     pub multiview_mask: Option<NonZeroU32>,
+    /// Optional upper bound on draw calls, including executed bundles.
+    pub max_draw_count: Option<u64>,
 }
 
 pub type RenderBasePass = BasePass<ArcRenderCommand, RenderPassError>;
@@ -332,6 +338,7 @@ pub struct RenderPass {
     timestamp_writes: Option<ArcPassTimestampWrites>,
     occlusion_query_set: Option<Arc<QuerySet>>,
     multiview_mask: Option<NonZeroU32>,
+    max_draw_count: Option<u64>,
 
     // Resource binding dedupe state.
     current_bind_groups: BindGroupStateChange,
@@ -354,6 +361,7 @@ impl RenderPass {
             depth_stencil_attachment,
             occlusion_query_set,
             multiview_mask,
+            max_draw_count,
         } = desc;
 
         Self {
@@ -364,6 +372,7 @@ impl RenderPass {
             timestamp_writes,
             occlusion_query_set,
             multiview_mask,
+            max_draw_count,
 
             current_bind_groups: BindGroupStateChange::new(),
             current_pipeline: StateChange::new(),
@@ -379,6 +388,7 @@ impl RenderPass {
             timestamp_writes: None,
             occlusion_query_set: None,
             multiview_mask: None,
+            max_draw_count: None,
             current_bind_groups: BindGroupStateChange::new(),
             current_pipeline: StateChange::new(),
         }
@@ -651,7 +661,7 @@ impl VertexState {
     /// Call `f` for each dirty slot with `(slot_index, buffer, offset, size)` and mark them clean.
     pub(crate) fn flush<F>(&mut self, mut f: F)
     where
-        F: FnMut(u32, &Arc<Buffer>, BufferAddress, Option<BufferSize>),
+        F: FnMut(u32, &Arc<Buffer>, BufferAddress, Option<BufferAddress>),
     {
         for (i, slot) in self.slots.iter_mut().enumerate() {
             let Some(slot) = slot.as_mut() else { continue };
@@ -660,12 +670,7 @@ impl VertexState {
             }
             slot.is_dirty = false;
             let size = slot.range.end - slot.range.start;
-            f(
-                i as u32,
-                &slot.buffer,
-                slot.range.start,
-                BufferSize::new(size),
-            );
+            f(i as u32, &slot.buffer, slot.range.start, Some(size));
         }
     }
 }
@@ -774,7 +779,11 @@ impl<'scope, 'snatch_guard, 'cmd_enc> State<'scope, 'snatch_guard, 'cmd_enc> {
                     // SAFETY: The offset and size were validated in set_vertex_buffer.
                     raw_encoder.set_vertex_buffer(
                         slot,
-                        hal::BufferBinding::new_unchecked(raw, offset, size),
+                        hal::BufferBinding::new_unchecked(
+                            raw,
+                            offset,
+                            size.and_then(BufferSize::new),
+                        ),
                     );
                 },
                 Err(e) => result = Err(e.into()),
@@ -969,6 +978,11 @@ pub enum RenderPassErrorInner {
     MissingDownlevelFlags(#[from] MissingDownlevelFlags),
     #[error("Indirect buffer offset {0:?} is not a multiple of 4")]
     UnalignedIndirectBufferOffset(BufferAddress),
+    #[error("Render pass draw count {draw_count} exceeds maximum {max_draw_count}")]
+    DrawCountExceeded {
+        draw_count: u64,
+        max_draw_count: u64,
+    },
     #[error("Indirect draw arguments of {args_size} bytes (count = {count}) starting at {offset} would overrun buffer size of {buffer_size}")]
     IndirectBufferOverrun {
         count: u32,
@@ -1106,6 +1120,7 @@ impl WebGpuError for RenderPassError {
             | RenderPassErrorInner::MismatchedResolveTextureFormat { .. }
             | RenderPassErrorInner::InvalidDepthOps
             | RenderPassErrorInner::InvalidStencilOps
+            | RenderPassErrorInner::DrawCountExceeded { .. }
             | RenderPassErrorInner::UnalignedIndirectBufferOffset(..)
             | RenderPassErrorInner::IndirectBufferOverrun { .. }
             | RenderPassErrorInner::IndirectCountBufferOverrun { .. }
@@ -1188,6 +1203,7 @@ impl RenderPassInfo {
     }
 
     fn start(
+        is_empty: bool,
         device: &Arc<Device>,
         hal_label: Option<&str>,
         color_attachments: &[Option<ArcRenderPassColorAttachment>],
@@ -1697,6 +1713,7 @@ impl RenderPassInfo {
         };
 
         let hal_desc = hal::RenderPassDescriptor {
+            is_empty,
             label: hal_label,
             extent,
             sample_count,
@@ -1788,6 +1805,7 @@ impl RenderPassInfo {
                 )
             };
             let desc = hal::RenderPassDescriptor::<'_, _, dyn hal::DynTextureView> {
+                is_empty: false,
                 label: hal_label(
                     Some("(wgpu internal) Zero init discarded depth/stencil aspect"),
                     instance_flags,
@@ -2075,6 +2093,7 @@ impl CommandEncoder {
                 };
 
             arc_desc.multiview_mask = desc.multiview_mask;
+            arc_desc.max_draw_count = desc.max_draw_count;
 
             Ok(())
         }
@@ -2093,6 +2112,7 @@ impl CommandEncoder {
                     depth_stencil_attachment: None,
                     occlusion_query_set: None,
                     multiview_mask: None,
+                    max_draw_count: None,
                 };
                 match fill_arc_desc(desc, &mut arc_desc, &self.device) {
                     Ok(()) => (RenderPass::new(self, arc_desc), None),
@@ -2203,6 +2223,7 @@ impl Global {
                 .as_ref()
                 .map(|query_set| query_sets.get(*query_set)),
             multiview_mask: desc.multiview_mask,
+            max_draw_count: desc.max_draw_count,
         };
 
         drop(texture_views);
@@ -2258,8 +2279,32 @@ impl Global {
         }
 
         cmd_buf_data.push_with(|| -> Result<_, RenderPassError> {
+            let base = base?;
+            if let Some(max_draw_count) = pass.max_draw_count {
+                let draw_count = base.commands.iter().fold(0u64, |total, command| {
+                    let count = match command {
+                        ArcRenderCommand::Draw { .. }
+                        | ArcRenderCommand::DrawIndexed { .. }
+                        | ArcRenderCommand::DrawMeshTasks { .. } => 1,
+                        ArcRenderCommand::DrawIndirect { count, .. } => u64::from(*count),
+                        ArcRenderCommand::MultiDrawIndirectCount { max_count, .. } => {
+                            u64::from(*max_count)
+                        }
+                        ArcRenderCommand::ExecuteBundle(bundle) => bundle.draw_count,
+                        _ => 0,
+                    };
+                    total.saturating_add(count)
+                });
+                if draw_count > max_draw_count {
+                    return Err(RenderPassErrorInner::DrawCountExceeded {
+                        draw_count,
+                        max_draw_count,
+                    }
+                    .map_pass_err(PassErrorScope::Pass));
+                }
+            }
             Ok(ArcCommand::RunRenderPass {
-                pass: base?,
+                pass: base,
                 color_attachments: SmallVec::from(pass.color_attachments.as_slice()),
                 depth_stencil_attachment: pass.depth_stencil_attachment.take(),
                 timestamp_writes: pass.timestamp_writes.take(),
@@ -2319,6 +2364,7 @@ pub(super) fn encode_render_pass(
         let mut pending_discard_init_fixups = SurfacesInDiscardState::new();
 
         let info = RenderPassInfo::start(
+            base.commands.is_empty(),
             device,
             hal_label(base.label.as_deref(), device.instance_flags),
             &color_attachments,
@@ -2843,7 +2889,7 @@ fn set_index_buffer(
     buffer: Arc<Buffer>,
     index_format: IndexFormat,
     offset: u64,
-    size: Option<BufferSize>,
+    size: Option<BufferAddress>,
 ) -> Result<(), RenderPassErrorInner> {
     api_log!("RenderPass::set_index_buffer {}", buffer.error_ident());
 
@@ -2865,7 +2911,7 @@ fn set_index_buffer(
         .into());
     }
     let (binding, resolved_size) = buffer
-        .binding(offset, size, state.pass.base.snatch_guard)
+        .binding_range(offset, size, state.pass.base.snatch_guard)
         .map_err(RenderCommandError::from)?;
     let end = offset + resolved_size;
     state.index.update_buffer(offset..end, index_format);
@@ -2895,7 +2941,7 @@ fn set_vertex_buffer(
     slot: u32,
     buffer: Option<Arc<Buffer>>,
     offset: u64,
-    size: Option<BufferSize>,
+    size: Option<BufferAddress>,
 ) -> Result<(), RenderPassErrorInner> {
     if let Some(ref buffer) = buffer {
         api_log!(
@@ -2923,7 +2969,7 @@ fn set_vertex_buffer(
             return Err(RenderCommandError::UnalignedVertexBuffer { slot, offset }.into());
         }
         let binding_size = buffer
-            .resolve_binding_size(offset, size)
+            .resolve_binding_range(offset, size)
             .map_err(RenderCommandError::from)?;
         let buffer_range = offset..(offset + binding_size);
 
@@ -2957,12 +3003,9 @@ fn set_vertex_buffer(
             )
             .into());
         }
-        if let Some(size) = size {
+        if let Some(size) = size.filter(|size| *size != 0) {
             return Err(RenderCommandError::from(
-                crate::binding_model::BindingError::UnbindingVertexBufferSizeNotZero {
-                    slot,
-                    size: size.get(),
-                },
+                crate::binding_model::BindingError::UnbindingVertexBufferSizeNotZero { slot, size },
             )
             .into());
         }
@@ -3611,6 +3654,7 @@ fn execute_bundle(
             state.pass.base.indirect_draw_validation_resources,
             indirect_draw_validation_batcher,
             state.pass.base.snatch_guard,
+            state.stencil_reference,
         )
     }
     .map_err(|e| match e {
@@ -3745,6 +3789,23 @@ impl Global {
         offset: BufferAddress,
         size: Option<BufferSize>,
     ) -> Result<(), PassStateError> {
+        self.render_pass_set_index_buffer_range(
+            pass,
+            buffer_id,
+            index_format,
+            offset,
+            size.map(BufferSize::get),
+        )
+    }
+
+    pub fn render_pass_set_index_buffer_range(
+        &self,
+        pass: &mut RenderPass,
+        buffer_id: id::BufferId,
+        index_format: IndexFormat,
+        offset: BufferAddress,
+        size: Option<BufferAddress>,
+    ) -> Result<(), PassStateError> {
         let scope = PassErrorScope::SetIndexBuffer;
         let base = pass_base!(pass, scope);
 
@@ -3780,6 +3841,23 @@ impl Global {
         buffer_id: Option<id::BufferId>,
         offset: BufferAddress,
         size: Option<BufferSize>,
+    ) -> Result<(), PassStateError> {
+        self.render_pass_set_vertex_buffer_range(
+            pass,
+            slot,
+            buffer_id,
+            offset,
+            size.map(BufferSize::get),
+        )
+    }
+
+    pub fn render_pass_set_vertex_buffer_range(
+        &self,
+        pass: &mut RenderPass,
+        slot: u32,
+        buffer_id: Option<id::BufferId>,
+        offset: BufferAddress,
+        size: Option<BufferAddress>,
     ) -> Result<(), PassStateError> {
         let scope = PassErrorScope::SetVertexBuffer;
         let base = pass_base!(pass, scope);

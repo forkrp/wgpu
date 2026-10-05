@@ -143,6 +143,7 @@ static PASS_RESET_VERTEX_BUFFER: GpuTestConfiguration = GpuTestConfiguration::ne
             .create_command_encoder(&CommandEncoderDescriptor::default());
 
         let mut double_rpass = encoder1.begin_render_pass(&RenderPassDescriptor {
+            max_draw_count: None,
             label: Some("double renderpass"),
             color_attachments: &[Some(RenderPassColorAttachment {
                 view: &view,
@@ -180,6 +181,7 @@ static PASS_RESET_VERTEX_BUFFER: GpuTestConfiguration = GpuTestConfiguration::ne
             .create_command_encoder(&CommandEncoderDescriptor::default());
 
         let mut single_rpass = encoder2.begin_render_pass(&RenderPassDescriptor {
+            max_draw_count: None,
             label: Some("single renderpass"),
             color_attachments: &[Some(RenderPassColorAttachment {
                 view: &view,

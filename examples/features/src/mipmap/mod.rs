@@ -157,6 +157,7 @@ impl Example {
             let timestamp_query_index_base = (target_mip as u32 - 1) * 2;
 
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                max_draw_count: None,
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &views[target_mip],
@@ -482,6 +483,7 @@ impl crate::framework::Example for Example {
                 a: 1.0,
             };
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                max_draw_count: None,
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,

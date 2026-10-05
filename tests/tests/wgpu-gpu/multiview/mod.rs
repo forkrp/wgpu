@@ -174,6 +174,7 @@ async fn run_test(ctx: TestingContext, layer_mask: u32, sample_count: u32) {
         .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
     {
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            max_draw_count: None,
             label: None,
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &entire_texture_view,

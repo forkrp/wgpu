@@ -236,6 +236,7 @@ impl ApplicationHandler for App {
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
                     {
                         let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            max_draw_count: None,
                             label: None,
                             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                                 view: &view,

@@ -109,6 +109,7 @@ impl Example {
                 a: 1.0,
             };
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                max_draw_count: None,
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,

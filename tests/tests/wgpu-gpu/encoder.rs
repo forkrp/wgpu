@@ -67,6 +67,7 @@ static DROP_ENCODER_AFTER_ERROR: GpuTestConfiguration = GpuTestConfiguration::ne
         let target_view = target_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut renderpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            max_draw_count: None,
             label: Some("renderpass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 ops: wgpu::Operations::default(),

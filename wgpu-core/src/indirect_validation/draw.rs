@@ -400,6 +400,7 @@ impl Draw {
             .encode(encoder);
 
         let desc = hal::ComputePassDescriptor {
+            is_empty: false,
             label: hal_label(
                 Some("(wgpu internal) Indirect draw validation pass"),
                 device.instance_flags,

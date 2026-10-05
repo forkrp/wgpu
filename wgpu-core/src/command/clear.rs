@@ -538,6 +538,7 @@ fn clear_texture_via_render_passes(
             unsafe {
                 encoder
                     .begin_render_pass(&hal::RenderPassDescriptor {
+                        is_empty: false,
                         label: hal_label(
                             Some("(wgpu internal) clear_texture clear pass"),
                             instance_flags,

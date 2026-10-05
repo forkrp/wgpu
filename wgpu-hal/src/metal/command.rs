@@ -153,11 +153,37 @@ impl Encoder<'_> {
 }
 
 impl super::CommandEncoder {
+    fn ensure_native_commands(&mut self) {
+        self.raw_written = true;
+        if let Some(pass) = self.deferred_pass.take() {
+            let raw = self.raw_cmd_buf.as_ref().unwrap();
+            match pass {
+                super::DeferredPass::Compute(descriptor, label) => {
+                    let encoder = raw
+                        .computeCommandEncoderWithDescriptor(&descriptor)
+                        .unwrap();
+                    if let Some(label) = label {
+                        encoder.setLabel(Some(&NSString::from_str(&label)));
+                    }
+                    encoder.endEncoding();
+                }
+                super::DeferredPass::Render(descriptor, label) => {
+                    let encoder = raw.renderCommandEncoderWithDescriptor(&descriptor).unwrap();
+                    if let Some(label) = label {
+                        encoder.setLabel(Some(&NSString::from_str(&label)));
+                    }
+                    encoder.endEncoding();
+                }
+            }
+        }
+    }
+
     pub fn raw_command_buffer(&self) -> Option<&ProtocolObject<dyn MTLCommandBuffer>> {
         self.raw_cmd_buf.as_deref()
     }
 
     fn enter_blit(&mut self) -> Retained<ProtocolObject<dyn MTLBlitCommandEncoder>> {
+        self.ensure_native_commands();
         if self.state.blit.is_none() {
             self.leave_acceleration_structure_builder();
             debug_assert!(self.state.render.is_none() && self.state.compute.is_none());
@@ -198,15 +224,16 @@ impl super::CommandEncoder {
                                 .sampleBufferAttachments()
                                 .objectAtIndexedSubscript(i)
                         };
-                        sba_descriptor
-                            .setSampleBuffer(Some(set.counter_sample_buffer.as_ref().unwrap()));
+                        sba_descriptor.setSampleBuffer(Some(set.sample_buffer()));
 
                         // Here be dragons:
                         // As mentioned above, for some reasons using the start of the encoder won't yield any results sometimes!
                         unsafe {
                             sba_descriptor.setStartOfEncoderSampleIndex(MTLCounterDontSample)
                         };
-                        unsafe { sba_descriptor.setEndOfEncoderSampleIndex(index as _) };
+                        unsafe {
+                            sba_descriptor.setEndOfEncoderSampleIndex(set.sample_index(index))
+                        };
 
                         last_query = Some((set, index));
                     }
@@ -245,8 +272,8 @@ impl super::CommandEncoder {
                 debug_assert!(supports_sample_counters_in_buffer);
                 unsafe {
                     encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
-                        set.counter_sample_buffer.as_ref().unwrap(),
-                        index as _,
+                        set.sample_buffer(),
+                        set.sample_index(index),
                         true,
                     )
                 };
@@ -264,6 +291,7 @@ impl super::CommandEncoder {
     fn enter_acceleration_structure_builder(
         &mut self,
     ) -> Retained<ProtocolObject<dyn MTLAccelerationStructureCommandEncoder>> {
+        self.ensure_native_commands();
         if self.state.acceleration_structure_builder.is_none() {
             self.leave_blit();
             debug_assert!(
@@ -489,15 +517,18 @@ impl crate::CommandEncoder for super::CommandEncoder {
             .command_buffer_created_not_submitted
             .fetch_add(1, atomic::Ordering::AcqRel);
         if previous >= adapter::MAX_COMMAND_BUFFERS {
+            self.queue_shared
+                .command_buffer_created_not_submitted
+                .fetch_sub(1, atomic::Ordering::AcqRel);
             let current = previous + 1;
             log::warn!(
                 "metal: refusing to create new command buffer; {current} outstanding command \
-                 buffers exceeds the limit of {}. Treating this as device lost. \
+                 buffers exceeds the limit of {}. Reporting out of memory. \
                  Ensure command encoders are submitted or dropped rather than kept alive \
                  to avoid exhausting Metal's command buffer budget.",
                 adapter::MAX_COMMAND_BUFFERS
             );
-            return Err(crate::DeviceError::Lost);
+            return Err(crate::DeviceError::OutOfMemory);
         }
 
         let raw = autoreleasepool(move |_| {
@@ -525,6 +556,8 @@ impl crate::CommandEncoder for super::CommandEncoder {
         // backends, which clear in `begin_encoding` rather than `discard_encoding`.
         debug_assert!(self.state.pending_timer_queries.is_empty());
 
+        self.raw_written = false;
+        self.deferred_pass = None;
         self.raw_cmd_buf = Some(raw);
 
         Ok(())
@@ -542,6 +575,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
             encoder.endEncoding();
         }
         self.state.pending_timer_queries.clear();
+        self.deferred_pass = None;
         let had_command_buffer = self.raw_cmd_buf.is_some();
         // Clear the Option first so the underlying `metal::CommandBuffer` is
         // dropped before we update the counter.
@@ -566,8 +600,19 @@ impl crate::CommandEncoder for super::CommandEncoder {
         debug_assert!(self.state.compute.is_none());
         debug_assert!(self.state.pending_timer_queries.is_empty());
 
+        let raw = self.raw_cmd_buf.take().unwrap();
+        let raw = if self.raw_written {
+            Some(raw)
+        } else {
+            drop(raw);
+            self.queue_shared
+                .command_buffer_created_not_submitted
+                .fetch_sub(1, atomic::Ordering::AcqRel);
+            None
+        };
         Ok(super::CommandBuffer {
-            raw: self.raw_cmd_buf.take().unwrap(),
+            raw,
+            deferred_pass: self.deferred_pass.take(),
             queue_shared: Arc::clone(&self.queue_shared),
         })
     }
@@ -799,7 +844,8 @@ impl crate::CommandEncoder for super::CommandEncoder {
             support.contains(TimestampQuerySupport::STAGE_BOUNDARIES),
             "Timestamp queries are not supported"
         );
-        let sample_buffer = set.counter_sample_buffer.as_ref().unwrap();
+        let sample_buffer = set.sample_buffer();
+        let sample_index = set.sample_index(index);
         let with_barrier = true;
 
         // Try to use an existing encoder for timestamp query if possible.
@@ -811,7 +857,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
             unsafe {
                 encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
                     sample_buffer,
-                    index as _,
+                    sample_index,
                     with_barrier,
                 )
             };
@@ -822,7 +868,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
             unsafe {
                 encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
                     sample_buffer,
-                    index as _,
+                    sample_index,
                     with_barrier,
                 )
             };
@@ -833,7 +879,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
             unsafe {
                 encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
                     sample_buffer,
-                    index as _,
+                    sample_index,
                     with_barrier,
                 )
             };
@@ -877,8 +923,11 @@ impl crate::CommandEncoder for super::CommandEncoder {
             wgt::QueryType::Timestamp => {
                 unsafe {
                     encoder.resolveCounters_inRange_destinationBuffer_destinationOffset(
-                        set.counter_sample_buffer.as_ref().unwrap(),
-                        NSRange::new(range.start as usize, (range.end - range.start) as usize),
+                        set.sample_buffer(),
+                        NSRange::new(
+                            set.sample_index(range.start),
+                            (range.end - range.start) as usize,
+                        ),
                         &buffer.raw,
                         offset as usize,
                     )
@@ -1007,33 +1056,31 @@ impl crate::CommandEncoder for super::CommandEncoder {
 
             for (set, index) in self.state.pending_timer_queries.drain(..) {
                 let sba_descriptor = next_sba_descriptor();
-                sba_descriptor.setSampleBuffer(Some(set.counter_sample_buffer.as_ref().unwrap()));
-                unsafe { sba_descriptor.setStartOfVertexSampleIndex(index as _) };
+                sba_descriptor.setSampleBuffer(Some(set.sample_buffer()));
+                unsafe { sba_descriptor.setStartOfVertexSampleIndex(set.sample_index(index)) };
                 unsafe { sba_descriptor.setEndOfFragmentSampleIndex(MTLCounterDontSample) };
             }
 
             if let Some(ref timestamp_writes) = desc.timestamp_writes {
                 let sba_descriptor = next_sba_descriptor();
-                sba_descriptor.setSampleBuffer(Some(
-                    timestamp_writes
-                        .query_set
-                        .counter_sample_buffer
-                        .as_ref()
-                        .unwrap(),
-                ));
+                sba_descriptor.setSampleBuffer(Some(timestamp_writes.query_set.sample_buffer()));
 
                 unsafe {
                     sba_descriptor.setStartOfVertexSampleIndex(
                         timestamp_writes
                             .beginning_of_pass_write_index
-                            .map_or(MTLCounterDontSample, |i| i as _),
+                            .map_or(MTLCounterDontSample, |i| {
+                                timestamp_writes.query_set.sample_index(i)
+                            }),
                     )
                 };
                 unsafe {
                     sba_descriptor.setEndOfFragmentSampleIndex(
                         timestamp_writes
                             .end_of_pass_write_index
-                            .map_or(MTLCounterDontSample, |i| i as _),
+                            .map_or(MTLCounterDontSample, |i| {
+                                timestamp_writes.query_set.sample_index(i)
+                            }),
                     )
                 };
             }
@@ -1049,6 +1096,14 @@ impl crate::CommandEncoder for super::CommandEncoder {
             if let Some(mv) = desc.multiview_mask {
                 descriptor.setRenderTargetArrayLength(32 - mv.leading_zeros() as usize);
             }
+            if desc.is_empty && !self.raw_written && self.deferred_pass.is_none() {
+                self.deferred_pass = Some(super::DeferredPass::Render(
+                    descriptor,
+                    desc.label.map(str::to_owned),
+                ));
+                return;
+            }
+            self.ensure_native_commands();
             let raw = self.raw_cmd_buf.as_ref().unwrap();
             let encoder = raw.renderCommandEncoderWithDescriptor(&descriptor).unwrap();
             if let Some(mv) = desc.multiview_mask {
@@ -1082,7 +1137,9 @@ impl crate::CommandEncoder for super::CommandEncoder {
     }
 
     unsafe fn end_render_pass(&mut self) {
-        self.state.render.take().unwrap().endEncoding();
+        if let Some(encoder) = self.state.render.take() {
+            encoder.endEncoding();
+        }
     }
 
     unsafe fn set_bind_group(
@@ -1253,11 +1310,13 @@ impl crate::CommandEncoder for super::CommandEncoder {
     }
 
     unsafe fn insert_debug_marker(&mut self, label: &str) {
+        self.ensure_native_commands();
         if let Some(encoder) = self.active_encoder() {
             encoder.insertDebugSignpost(&NSString::from_str(label));
         }
     }
     unsafe fn begin_debug_marker(&mut self, group_label: &str) {
+        self.ensure_native_commands();
         if let Some(encoder) = self.active_encoder() {
             encoder.pushDebugGroup(&NSString::from_str(group_label));
         } else if let Some(ref buf) = self.raw_cmd_buf {
@@ -1265,6 +1324,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
         }
     }
     unsafe fn end_debug_marker(&mut self) {
+        self.ensure_native_commands();
         if let Some(encoder) = self.active_encoder() {
             encoder.popDebugGroup();
         } else if let Some(ref buf) = self.raw_cmd_buf {
@@ -1689,6 +1749,13 @@ impl crate::CommandEncoder for super::CommandEncoder {
         debug_assert!(self.state.compute.is_none());
         debug_assert!(self.state.render.is_none());
 
+        if !(desc.is_empty
+            && !self.raw_written
+            && self.deferred_pass.is_none()
+            && !self.shared.private_caps.timestamp_query_support.is_empty())
+        {
+            self.ensure_native_commands();
+        }
         let raw = self.raw_cmd_buf.as_ref().unwrap();
 
         autoreleasepool(|_| {
@@ -1712,38 +1779,43 @@ impl crate::CommandEncoder for super::CommandEncoder {
 
                 for (set, index) in self.state.pending_timer_queries.drain(..) {
                     let sba_descriptor = next_sba_descriptor();
-                    sba_descriptor
-                        .setSampleBuffer(Some(set.counter_sample_buffer.as_ref().unwrap()));
-                    unsafe { sba_descriptor.setStartOfEncoderSampleIndex(index as _) };
+                    sba_descriptor.setSampleBuffer(Some(set.sample_buffer()));
+                    unsafe { sba_descriptor.setStartOfEncoderSampleIndex(set.sample_index(index)) };
                     unsafe { sba_descriptor.setEndOfEncoderSampleIndex(MTLCounterDontSample) };
                 }
 
                 if let Some(timestamp_writes) = desc.timestamp_writes.as_ref() {
                     let sba_descriptor = next_sba_descriptor();
-                    sba_descriptor.setSampleBuffer(Some(
-                        timestamp_writes
-                            .query_set
-                            .counter_sample_buffer
-                            .as_ref()
-                            .unwrap(),
-                    ));
+                    sba_descriptor
+                        .setSampleBuffer(Some(timestamp_writes.query_set.sample_buffer()));
 
                     unsafe {
                         sba_descriptor.setStartOfEncoderSampleIndex(
                             timestamp_writes
                                 .beginning_of_pass_write_index
-                                .map_or(MTLCounterDontSample, |i| i as _),
+                                .map_or(MTLCounterDontSample, |i| {
+                                    timestamp_writes.query_set.sample_index(i)
+                                }),
                         )
                     };
                     unsafe {
                         sba_descriptor.setEndOfEncoderSampleIndex(
                             timestamp_writes
                                 .end_of_pass_write_index
-                                .map_or(MTLCounterDontSample, |i| i as _),
+                                .map_or(MTLCounterDontSample, |i| {
+                                    timestamp_writes.query_set.sample_index(i)
+                                }),
                         )
                     };
                 }
 
+                if desc.is_empty && !self.raw_written && self.deferred_pass.is_none() {
+                    self.deferred_pass = Some(super::DeferredPass::Compute(
+                        descriptor,
+                        desc.label.map(str::to_owned),
+                    ));
+                    return;
+                }
                 raw.computeCommandEncoderWithDescriptor(&descriptor)
                     .unwrap()
             };
@@ -1756,7 +1828,9 @@ impl crate::CommandEncoder for super::CommandEncoder {
         });
     }
     unsafe fn end_compute_pass(&mut self) {
-        self.state.compute.take().unwrap().endEncoding();
+        if let Some(encoder) = self.state.compute.take() {
+            encoder.endEncoding();
+        }
     }
 
     unsafe fn set_compute_pipeline(&mut self, pipeline: &super::ComputePipeline) {
@@ -1897,18 +1971,21 @@ impl crate::CommandEncoder for super::CommandEncoder {
         command_buffers: &[&super::CommandBuffer],
         dependencies: &[&super::AccelerationStructure],
     ) {
-        let Some(first_command_buffer) = command_buffers.first() else {
+        let mut raw_buffers = command_buffers
+            .iter()
+            .filter_map(|buffer| buffer.raw.as_ref());
+        let Some(first_raw) = raw_buffers.next() else {
             return;
         };
         let desc = MTLResidencySetDescriptor::new();
-        desc.setLabel(first_command_buffer.raw.label().as_deref());
-        let residency_set = first_command_buffer
-            .raw
+        desc.setLabel(first_raw.label().as_deref());
+        let residency_set = first_raw
             .device()
             .newResidencySetWithDescriptor_error(&desc)
             .unwrap();
-        for command_buffer in command_buffers {
-            command_buffer.raw.useResidencySet(&residency_set);
+        first_raw.useResidencySet(&residency_set);
+        for raw in raw_buffers {
+            raw.useResidencySet(&residency_set);
         }
         for dependency in dependencies {
             residency_set.addAllocation(ProtocolObject::from_ref(&*dependency.raw));
@@ -1965,7 +2042,10 @@ impl Drop for super::CommandBuffer {
         // `command_buffer_created_not_submitted` is usually decremented when the command
         // buffer is submitted. But if we're dropping a command buffer that was never
         // submitted, we need to decrement the count here.
-        let status = self.raw.status();
+        let Some(raw) = self.raw.as_ref() else {
+            return;
+        };
+        let status = raw.status();
         if status == MTLCommandBufferStatus::NotEnqueued
             || status == MTLCommandBufferStatus::Enqueued
         {

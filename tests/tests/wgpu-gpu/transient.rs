@@ -105,6 +105,7 @@ static RESOLVE_WITH_TRANSIENT: GpuTestConfiguration = GpuTestConfiguration::new(
 
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                max_draw_count: None,
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &transient_texture.create_view(&wgpu::TextureViewDescriptor::default()),

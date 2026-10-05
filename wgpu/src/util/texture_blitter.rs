@@ -198,6 +198,7 @@ impl TextureBlitter {
         });
 
         let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+            max_draw_count: None,
             label: Some("wgpu::util::TextureBlitter::pass"),
             color_attachments: &[Some(crate::RenderPassColorAttachment {
                 view: target,

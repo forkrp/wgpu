@@ -260,6 +260,7 @@ impl crate::framework::Example for Example {
 
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                max_draw_count: None,
                 label: Some("low resolution"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.low_res_target,
@@ -283,6 +284,7 @@ impl crate::framework::Example for Example {
         }
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                max_draw_count: None,
                 label: Some("full resolution"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,

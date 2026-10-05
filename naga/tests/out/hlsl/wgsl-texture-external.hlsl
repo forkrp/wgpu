@@ -15,7 +15,7 @@ struct NagaExternalTextureParams {
     float2 load_transform_0; float2 load_transform_1; float2 load_transform_2;
     uint2 size;
     uint num_planes;
-    int _end_pad_0;
+    uint is_premultiplied;
 };
 
 Texture2D<float4> tex_plane0_: register(t0);
@@ -49,7 +49,26 @@ float4 nagaTextureSampleBaseClampToEdge(
     float2 plane0_half_texel = float2(0.5, 0.5) / plane0_size;
     float2 plane0_coords = clamp(coords, bounds.xy + plane0_half_texel, bounds.zw - plane0_half_texel);
     if (params.num_planes == 1u) {
-        return plane0.SampleLevel(samp, plane0_coords, 0.0f);
+        float4 rgba = plane0.SampleLevel(samp, plane0_coords, 0.0f);
+        if (params.is_premultiplied != 0u) {
+            rgba.rgb = rgba.a == 0.0 ? float3(0.0, 0.0, 0.0) : rgba.rgb / rgba.a;
+        }
+        float3 srcGammaRgb = rgba.rgb;
+        if (params.src_tf.a == 1.0 && params.src_tf.g == 1.0 && params.src_tf.k == 1.0 &&
+            params.dst_tf.a == 1.0 && params.dst_tf.g == 1.0 && params.dst_tf.k == 1.0 &&
+            all(params.gamut_conversion_matrix[0] == float3(1.0, 0.0, 0.0)) &&
+            all(params.gamut_conversion_matrix[1] == float3(0.0, 1.0, 0.0)) &&
+            all(params.gamut_conversion_matrix[2] == float3(0.0, 0.0, 1.0))) return rgba;
+        float3 srcAbs = abs(srcGammaRgb);
+        float3 srcSign = srcGammaRgb < 0.0 ? -1.0 : 1.0;
+        float3 srcLinearRgb = srcSign * (srcAbs < params.src_tf.k * params.src_tf.b ?
+            srcAbs / params.src_tf.k : pow((srcAbs + params.src_tf.a - 1.0) / params.src_tf.a, params.src_tf.g));
+        float3 dstLinearRgb = mul(srcLinearRgb, params.gamut_conversion_matrix);
+        float3 dstAbs = abs(dstLinearRgb);
+        float3 dstSign = dstLinearRgb < 0.0 ? -1.0 : 1.0;
+        float3 dstGammaRgb = dstSign * (dstAbs < params.dst_tf.b ?
+            params.dst_tf.k * dstAbs : params.dst_tf.a * pow(dstAbs, 1.0 / params.dst_tf.g) - (params.dst_tf.a - 1.0));
+        return float4(dstGammaRgb, rgba.a);
     } else {
         float2 plane1_size;
         plane1.GetDimensions(plane1_size.x, plane1_size.y);
@@ -66,15 +85,26 @@ float4 nagaTextureSampleBaseClampToEdge(
             float2 plane2_coords = clamp(coords, bounds.xy + plane2_half_texel, bounds.zw - plane2_half_texel);
             uv = float2(plane1.SampleLevel(samp, plane1_coords, 0.0f).x, plane2.SampleLevel(samp, plane2_coords, 0.0f).x);
         }
-        float3 srcGammaRgb = mul(float4(y, uv, 1.0), params.yuv_conversion_matrix).rgb;
-        float3 srcLinearRgb = srcGammaRgb < params.src_tf.k * params.src_tf.b ?
-            srcGammaRgb / params.src_tf.k :
-            pow((srcGammaRgb + params.src_tf.a - 1.0) / params.src_tf.a, params.src_tf.g);
+        float4 rgba = float4(mul(float4(y, uv, 1.0), params.yuv_conversion_matrix).rgb, 1.0);
+        if (params.is_premultiplied != 0u) {
+            rgba.rgb = rgba.a == 0.0 ? float3(0.0, 0.0, 0.0) : rgba.rgb / rgba.a;
+        }
+        float3 srcGammaRgb = rgba.rgb;
+        if (params.src_tf.a == 1.0 && params.src_tf.g == 1.0 && params.src_tf.k == 1.0 &&
+            params.dst_tf.a == 1.0 && params.dst_tf.g == 1.0 && params.dst_tf.k == 1.0 &&
+            all(params.gamut_conversion_matrix[0] == float3(1.0, 0.0, 0.0)) &&
+            all(params.gamut_conversion_matrix[1] == float3(0.0, 1.0, 0.0)) &&
+            all(params.gamut_conversion_matrix[2] == float3(0.0, 0.0, 1.0))) return rgba;
+        float3 srcAbs = abs(srcGammaRgb);
+        float3 srcSign = srcGammaRgb < 0.0 ? -1.0 : 1.0;
+        float3 srcLinearRgb = srcSign * (srcAbs < params.src_tf.k * params.src_tf.b ?
+            srcAbs / params.src_tf.k : pow((srcAbs + params.src_tf.a - 1.0) / params.src_tf.a, params.src_tf.g));
         float3 dstLinearRgb = mul(srcLinearRgb, params.gamut_conversion_matrix);
-        float3 dstGammaRgb = dstLinearRgb < params.dst_tf.b ?
-            params.dst_tf.k * dstLinearRgb :
-            params.dst_tf.a * pow(dstLinearRgb, 1.0 / params.dst_tf.g) - (params.dst_tf.a - 1);
-        return float4(dstGammaRgb, 1.0);
+        float3 dstAbs = abs(dstLinearRgb);
+        float3 dstSign = dstLinearRgb < 0.0 ? -1.0 : 1.0;
+        float3 dstGammaRgb = dstSign * (dstAbs < params.dst_tf.b ?
+            params.dst_tf.k * dstAbs : params.dst_tf.a * pow(dstAbs, 1.0 / params.dst_tf.g) - (params.dst_tf.a - 1.0));
+        return float4(dstGammaRgb, rgba.a);
     }
 }
 
@@ -96,7 +126,26 @@ float4 nagaTextureLoadExternal(
     );
     uint2 plane0_coords = uint2(round(mul(float3(coords, 1.0), load_transform)));
     if (params.num_planes == 1u) {
-        return plane0.Load(uint3(plane0_coords, 0u));
+        float4 rgba = plane0.Load(uint3(plane0_coords, 0u));
+        if (params.is_premultiplied != 0u) {
+            rgba.rgb = rgba.a == 0.0 ? float3(0.0, 0.0, 0.0) : rgba.rgb / rgba.a;
+        }
+        float3 srcGammaRgb = rgba.rgb;
+        if (params.src_tf.a == 1.0 && params.src_tf.g == 1.0 && params.src_tf.k == 1.0 &&
+            params.dst_tf.a == 1.0 && params.dst_tf.g == 1.0 && params.dst_tf.k == 1.0 &&
+            all(params.gamut_conversion_matrix[0] == float3(1.0, 0.0, 0.0)) &&
+            all(params.gamut_conversion_matrix[1] == float3(0.0, 1.0, 0.0)) &&
+            all(params.gamut_conversion_matrix[2] == float3(0.0, 0.0, 1.0))) return rgba;
+        float3 srcAbs = abs(srcGammaRgb);
+        float3 srcSign = srcGammaRgb < 0.0 ? -1.0 : 1.0;
+        float3 srcLinearRgb = srcSign * (srcAbs < params.src_tf.k * params.src_tf.b ?
+            srcAbs / params.src_tf.k : pow((srcAbs + params.src_tf.a - 1.0) / params.src_tf.a, params.src_tf.g));
+        float3 dstLinearRgb = mul(srcLinearRgb, params.gamut_conversion_matrix);
+        float3 dstAbs = abs(dstLinearRgb);
+        float3 dstSign = dstLinearRgb < 0.0 ? -1.0 : 1.0;
+        float3 dstGammaRgb = dstSign * (dstAbs < params.dst_tf.b ?
+            params.dst_tf.k * dstAbs : params.dst_tf.a * pow(dstAbs, 1.0 / params.dst_tf.g) - (params.dst_tf.a - 1.0));
+        return float4(dstGammaRgb, rgba.a);
     } else {
         uint2 plane1_size;
         plane1.GetDimensions(plane1_size.x, plane1_size.y);
@@ -111,15 +160,26 @@ float4 nagaTextureLoadExternal(
             uint2 plane2_coords = uint2(floor(float2(plane0_coords) * float2(plane2_size) / float2(plane0_size)));
             uv = float2(plane1.Load(uint3(plane1_coords, 0u)).x, plane2.Load(uint3(plane2_coords, 0u)).x);
         }
-        float3 srcGammaRgb = mul(float4(y, uv, 1.0), params.yuv_conversion_matrix).rgb;
-        float3 srcLinearRgb = srcGammaRgb < params.src_tf.k * params.src_tf.b ?
-            srcGammaRgb / params.src_tf.k :
-            pow((srcGammaRgb + params.src_tf.a - 1.0) / params.src_tf.a, params.src_tf.g);
+        float4 rgba = float4(mul(float4(y, uv, 1.0), params.yuv_conversion_matrix).rgb, 1.0);
+        if (params.is_premultiplied != 0u) {
+            rgba.rgb = rgba.a == 0.0 ? float3(0.0, 0.0, 0.0) : rgba.rgb / rgba.a;
+        }
+        float3 srcGammaRgb = rgba.rgb;
+        if (params.src_tf.a == 1.0 && params.src_tf.g == 1.0 && params.src_tf.k == 1.0 &&
+            params.dst_tf.a == 1.0 && params.dst_tf.g == 1.0 && params.dst_tf.k == 1.0 &&
+            all(params.gamut_conversion_matrix[0] == float3(1.0, 0.0, 0.0)) &&
+            all(params.gamut_conversion_matrix[1] == float3(0.0, 1.0, 0.0)) &&
+            all(params.gamut_conversion_matrix[2] == float3(0.0, 0.0, 1.0))) return rgba;
+        float3 srcAbs = abs(srcGammaRgb);
+        float3 srcSign = srcGammaRgb < 0.0 ? -1.0 : 1.0;
+        float3 srcLinearRgb = srcSign * (srcAbs < params.src_tf.k * params.src_tf.b ?
+            srcAbs / params.src_tf.k : pow((srcAbs + params.src_tf.a - 1.0) / params.src_tf.a, params.src_tf.g));
         float3 dstLinearRgb = mul(srcLinearRgb, params.gamut_conversion_matrix);
-        float3 dstGammaRgb = dstLinearRgb < params.dst_tf.b ?
-            params.dst_tf.k * dstLinearRgb :
-            params.dst_tf.a * pow(dstLinearRgb, 1.0 / params.dst_tf.g) - (params.dst_tf.a - 1);
-        return float4(dstGammaRgb, 1.0);
+        float3 dstAbs = abs(dstLinearRgb);
+        float3 dstSign = dstLinearRgb < 0.0 ? -1.0 : 1.0;
+        float3 dstGammaRgb = dstSign * (dstAbs < params.dst_tf.b ?
+            params.dst_tf.k * dstAbs : params.dst_tf.a * pow(dstAbs, 1.0 / params.dst_tf.g) - (params.dst_tf.a - 1.0));
+        return float4(dstGammaRgb, rgba.a);
     }
 }
 

@@ -390,6 +390,7 @@ pub trait CommandEncoderInterface: CommonTraits {
     );
 }
 pub trait ComputePassInterface: CommonTraits + Drop {
+    fn abandon(&mut self);
     fn set_pipeline(&mut self, pipeline: &DispatchComputePipeline);
     fn set_bind_group(
         &mut self,
@@ -423,6 +424,7 @@ pub trait ComputePassInterface: CommonTraits + Drop {
     );
 }
 pub trait RenderPassInterface: CommonTraits + Drop {
+    fn abandon(&mut self);
     fn set_pipeline(&mut self, pipeline: &DispatchRenderPipeline);
     fn set_bind_group(
         &mut self,
@@ -435,14 +437,14 @@ pub trait RenderPassInterface: CommonTraits + Drop {
         buffer: &DispatchBuffer,
         index_format: crate::IndexFormat,
         offset: crate::BufferAddress,
-        size: Option<crate::BufferSize>,
+        size: Option<crate::BufferAddress>,
     );
     fn set_vertex_buffer(
         &mut self,
         slot: u32,
         buffer: Option<&DispatchBuffer>,
         offset: crate::BufferAddress,
-        size: Option<crate::BufferSize>,
+        size: Option<crate::BufferAddress>,
     );
     fn set_immediates(&mut self, offset: u32, data: &[u8]);
     fn set_blend_constant(&mut self, color: crate::Color);
@@ -460,6 +462,21 @@ pub trait RenderPassInterface: CommonTraits + Drop {
 
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>);
     fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>);
+    fn draw_counted(
+        &mut self,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    );
+    fn draw_indexed_counted(
+        &mut self,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        base_vertex: i32,
+        first_instance: u32,
+    );
     fn draw_mesh_tasks(&mut self, group_count_x: u32, group_count_y: u32, group_count_z: u32);
     fn draw_indirect(
         &mut self,
@@ -546,19 +563,34 @@ pub trait RenderBundleEncoderInterface: CommonTraits {
         buffer: &DispatchBuffer,
         index_format: crate::IndexFormat,
         offset: crate::BufferAddress,
-        size: Option<crate::BufferSize>,
+        size: Option<crate::BufferAddress>,
     );
     fn set_vertex_buffer(
         &mut self,
         slot: u32,
         buffer: Option<&DispatchBuffer>,
         offset: crate::BufferAddress,
-        size: Option<crate::BufferSize>,
+        size: Option<crate::BufferAddress>,
     );
     fn set_immediates(&mut self, offset: u32, data: &[u8]);
 
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>);
     fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>);
+    fn draw_counted(
+        &mut self,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    );
+    fn draw_indexed_counted(
+        &mut self,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        base_vertex: i32,
+        first_instance: u32,
+    );
     fn draw_indirect(
         &mut self,
         indirect_buffer: &DispatchBuffer,

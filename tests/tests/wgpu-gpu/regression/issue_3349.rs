@@ -150,6 +150,7 @@ async fn multi_stage_data_binding_test(ctx: TestingContext) {
 
     {
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            max_draw_count: None,
             label: Some("rpass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &view,

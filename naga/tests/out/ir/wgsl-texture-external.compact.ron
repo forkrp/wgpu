@@ -141,6 +141,12 @@
                         binding: None,
                         offset: 200,
                     ),
+                    (
+                        name: Some("is_premultiplied"),
+                        ty: 1,
+                        binding: None,
+                        offset: 204,
+                    ),
                 ],
                 span: 208,
             ),

@@ -47,13 +47,13 @@ use objc2::{
 use objc2_foundation::ns_string;
 use objc2_metal::{
     MTLAccelerationStructure, MTLAccelerationStructureCommandEncoder, MTLArgumentBuffersTier,
-    MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue,
-    MTLComputeCommandEncoder, MTLComputePipelineState, MTLCounterSampleBuffer, MTLCullMode,
-    MTLDepthClipMode, MTLDepthStencilState, MTLDevice, MTLDrawable, MTLIndexType,
-    MTLLanguageVersion, MTLLibrary, MTLPrimitiveType, MTLReadWriteTextureTier,
-    MTLRenderCommandEncoder, MTLRenderPipelineState, MTLRenderStages, MTLResource,
-    MTLResourceUsage, MTLSamplerState, MTLSharedEvent, MTLSize, MTLTexture, MTLTextureType,
-    MTLTriangleFillMode, MTLWinding,
+    MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder,
+    MTLCommandQueue, MTLComputeCommandEncoder, MTLComputePassDescriptor, MTLComputePipelineState,
+    MTLCounterSampleBuffer, MTLCullMode, MTLDepthClipMode, MTLDepthStencilState, MTLDevice,
+    MTLDrawable, MTLIndexType, MTLLanguageVersion, MTLLibrary, MTLPrimitiveType,
+    MTLReadWriteTextureTier, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
+    MTLRenderPipelineState, MTLRenderStages, MTLResource, MTLResourceUsage, MTLSamplerState,
+    MTLSharedEvent, MTLSize, MTLTexture, MTLTextureType, MTLTriangleFillMode, MTLWinding,
 };
 use objc2_quartz_core::CAMetalLayer;
 use parking_lot::{Condvar, Mutex, RwLock};
@@ -400,6 +400,7 @@ struct AdapterShared {
     private_texture_format_caps: PrivateTextureFormatCapabilities,
     settings: Settings,
     presentation_timer: time::PresentationTimer,
+    timestamp_pool: OnceLock<Arc<Mutex<Vec<Arc<CounterPage>>>>>,
 }
 
 #[cfg(send_sync)]
@@ -422,6 +423,7 @@ impl AdapterShared {
             device,
             settings: Settings::default(),
             presentation_timer: time::PresentationTimer::new(),
+            timestamp_pool: OnceLock::new(),
         }
     }
 
@@ -734,68 +736,94 @@ impl crate::Queue for Queue {
                 }
             }
 
-            let extra_command_buffer = {
-                let fence_sync = Arc::clone(&signal_fence.sync);
-                let block = block2::RcBlock::new(move |_cmd_buf| {
-                    *fence_sync.0.lock() = signal_value;
-                    fence_sync.1.notify_all();
-                });
-
-                let raw = match command_buffers.last() {
-                    Some(&cmd_buf) => cmd_buf.raw.clone(),
-                    None => {
-                        // We do not bother adjusting `command_buffer_created_not_submitted`
-                        // because we immediately commit this buffer.
-                        self.shared
-                            .raw
-                            .commandBufferWithUnretainedReferences()
-                            .ok_or(crate::DeviceError::Lost)?
-                    }
-                };
-                raw.setLabel(Some(ns_string!("(wgpu internal) Signal")));
-                unsafe { raw.addCompletedHandler(block2::RcBlock::as_ptr(&block)) };
-
-                signal_fence.maintain();
-                signal_fence
-                    .pending_command_buffers
-                    .write()
-                    .push((signal_value, raw.clone()));
-
-                if let Some(shared_event) = &signal_fence.shared_event {
-                    raw.encodeSignalEvent_value(shared_event.as_ref(), signal_value);
-                }
-
-                // Drain caller-staged signals after our own signal so each
-                // additional event value publishes once the submit completes.
-                {
-                    let mut signals = self.shared.pending_signals.lock();
-                    for (event, value) in signals.drain(..) {
-                        raw.encodeSignalEvent_value(event.as_ref(), value);
-                    }
-                }
-
-                // only return an extra one if it's extra
-                match command_buffers.last() {
-                    Some(_) => None,
-                    None => Some(raw),
+            let commit = |raw: &ProtocolObject<dyn MTLCommandBuffer>, counted: bool| {
+                raw.commit();
+                if counted {
+                    let previous = self
+                        .shared
+                        .command_buffer_created_not_submitted
+                        .fetch_sub(1, atomic::Ordering::AcqRel);
+                    debug_assert!(previous > 0);
                 }
             };
-
-            for cmd_buffer in command_buffers {
-                cmd_buffer.raw.commit();
-                // One command buffer per `end_encoding` call moves from the
-                // "created but not yet submitted" bucket into the submitted
-                // set, so update the counter.
-                let previous = self
-                    .shared
-                    .command_buffer_created_not_submitted
-                    .fetch_sub(1, atomic::Ordering::AcqRel);
-                debug_assert!(previous > 0);
+            let mut pending: Option<(Retained<ProtocolObject<dyn MTLCommandBuffer>>, bool)> = None;
+            let mut deferred_count = 0;
+            for buffer in command_buffers {
+                if let Some(raw) = &buffer.raw {
+                    if let Some((previous, counted)) = pending.take() {
+                        commit(&previous, counted);
+                    }
+                    pending = Some((raw.clone(), true));
+                    deferred_count = 0;
+                } else if let Some(pass) = &buffer.deferred_pass {
+                    if pending.as_ref().is_some_and(|(_, counted)| *counted) || deferred_count == 32
+                    {
+                        let (previous, counted) = pending.take().unwrap();
+                        commit(&previous, counted);
+                        deferred_count = 0;
+                    }
+                    if pending.is_none() {
+                        let raw = self
+                            .shared
+                            .raw
+                            .commandBuffer()
+                            .ok_or(crate::DeviceError::OutOfMemory)?;
+                        pending = Some((raw, false));
+                    }
+                    let raw = &pending.as_ref().unwrap().0;
+                    match pass {
+                        DeferredPass::Compute(descriptor, label) => {
+                            let encoder = raw
+                                .computeCommandEncoderWithDescriptor(descriptor)
+                                .ok_or(crate::DeviceError::OutOfMemory)?;
+                            if let Some(label) = label {
+                                encoder
+                                    .setLabel(Some(&objc2_foundation::NSString::from_str(label)));
+                            }
+                            encoder.endEncoding();
+                        }
+                        DeferredPass::Render(descriptor, label) => {
+                            let encoder = raw
+                                .renderCommandEncoderWithDescriptor(descriptor)
+                                .ok_or(crate::DeviceError::OutOfMemory)?;
+                            if let Some(label) = label {
+                                encoder
+                                    .setLabel(Some(&objc2_foundation::NSString::from_str(label)));
+                            }
+                            encoder.endEncoding();
+                        }
+                    }
+                    deferred_count += 1;
+                }
             }
-
-            if let Some(raw) = extra_command_buffer {
-                raw.commit();
+            let (raw, counted) = match pending {
+                Some(last) => last,
+                None => (
+                    self.shared
+                        .raw
+                        .commandBufferWithUnretainedReferences()
+                        .ok_or(crate::DeviceError::OutOfMemory)?,
+                    false,
+                ),
+            };
+            let fence_sync = Arc::clone(&signal_fence.sync);
+            let block = block2::RcBlock::new(move |_cmd_buf| {
+                *fence_sync.0.lock() = signal_value;
+                fence_sync.1.notify_all();
+            });
+            unsafe { raw.addCompletedHandler(block2::RcBlock::as_ptr(&block)) };
+            signal_fence.maintain();
+            signal_fence
+                .pending_command_buffers
+                .write()
+                .push((signal_value, raw.clone()));
+            if let Some(shared_event) = &signal_fence.shared_event {
+                raw.encodeSignalEvent_value(shared_event.as_ref(), signal_value);
             }
+            for (event, value) in self.shared.pending_signals.lock().drain(..) {
+                raw.encodeSignalEvent_value(event.as_ref(), value);
+            }
+            commit(&raw, counted);
             Ok(())
         })
     }
@@ -1237,12 +1265,44 @@ pub struct RayTracingPipeline {}
 
 impl crate::DynRayTracingPipeline for RayTracingPipeline {}
 
+#[derive(Debug)]
+struct CounterPage {
+    buffer: Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>,
+    ranges: Mutex<range_alloc::RangeAllocator<u32>>,
+}
+
+// Metal counter buffers can be shared across threads; each allocation owns distinct samples.
+unsafe impl Send for CounterPage {}
+unsafe impl Sync for CounterPage {}
+
+#[derive(Debug)]
+struct CounterAllocation {
+    page: Arc<CounterPage>,
+    range: ops::Range<u32>,
+}
+
+impl Drop for CounterAllocation {
+    fn drop(&mut self) {
+        self.page.ranges.lock().free_range(self.range.clone());
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct QuerySet {
     raw_buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
     //Metal has a custom buffer for counters.
-    counter_sample_buffer: Option<Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>>,
+    counter_sample_buffer: Option<Arc<CounterAllocation>>,
     ty: wgt::QueryType,
+}
+
+impl QuerySet {
+    fn sample_buffer(&self) -> &ProtocolObject<dyn MTLCounterSampleBuffer> {
+        &self.counter_sample_buffer.as_ref().unwrap().page.buffer
+    }
+
+    fn sample_index(&self, index: u32) -> usize {
+        self.counter_sample_buffer.as_ref().unwrap().range.start as usize + index as usize
+    }
 }
 
 impl crate::DynQuerySet for QuerySet {}
@@ -1350,7 +1410,15 @@ struct CommandState {
 
 // Any state in this struct that may be dirty after an abandoned encoding must
 // be reset in `discard_encoding` for possible encoder reuse.
+#[derive(Debug)]
+enum DeferredPass {
+    Compute(Retained<MTLComputePassDescriptor>, Option<String>),
+    Render(Retained<MTLRenderPassDescriptor>, Option<String>),
+}
+
 pub struct CommandEncoder {
+    deferred_pass: Option<DeferredPass>,
+    raw_written: bool,
     shared: Arc<AdapterShared>,
     queue_shared: Arc<QueueShared>,
     raw_cmd_buf: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
@@ -1372,7 +1440,8 @@ unsafe impl Sync for CommandEncoder {}
 
 #[derive(Debug)]
 pub struct CommandBuffer {
-    raw: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    raw: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
+    deferred_pass: Option<DeferredPass>,
     queue_shared: Arc<QueueShared>,
 }
 

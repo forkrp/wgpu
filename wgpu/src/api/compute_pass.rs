@@ -28,6 +28,14 @@ static_assertions::assert_impl_all!(ComputePass<'_>: Send, Sync);
 crate::cmp::impl_eq_ord_hash_proxy!(ComputePass<'_> => .inner);
 
 impl ComputePass<'_> {
+    /// Discard this pass without recording an end command.
+    ///
+    /// The parent command encoder remains locked. This is intended for language
+    /// bindings whose garbage collection must not implicitly end an open pass.
+    pub fn abandon(mut self) {
+        self.inner.abandon();
+    }
+
     /// Drops the lifetime relationship to the parent command encoder, making usage of
     /// the encoder while this pass is recorded a run-time error instead.
     ///

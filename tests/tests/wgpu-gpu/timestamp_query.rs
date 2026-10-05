@@ -7,8 +7,72 @@ use wgpu_test::{
 };
 
 pub fn all_tests(vec: &mut Vec<GpuTestInitializer>) {
-    vec.push(TIMESTAMP_QUERY);
+    vec.extend([
+        TIMESTAMP_QUERY,
+        MANY_TIMESTAMP_QUERY_SETS,
+        MANY_TIMESTAMP_PASSES,
+    ]);
 }
+
+#[gpu_test]
+static MANY_TIMESTAMP_QUERY_SETS: GpuTestConfiguration = GpuTestConfiguration::new()
+    .parameters(TestParameters::default().features(Features::TIMESTAMP_QUERY))
+    .run_sync(|ctx| {
+        let queries: Vec<_> = (0..256)
+            .map(|_| {
+                ctx.device.create_query_set(&wgpu::QuerySetDescriptor {
+                    label: None,
+                    ty: wgpu::QueryType::Timestamp,
+                    count: 2,
+                })
+            })
+            .collect();
+        wgpu_test::valid(&ctx.device, || {
+            let mut encoder = ctx.device.create_command_encoder(&Default::default());
+            for query in &queries {
+                drop(encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: None,
+                    timestamp_writes: Some(ComputePassTimestampWrites {
+                        query_set: query,
+                        beginning_of_pass_write_index: Some(0),
+                        end_of_pass_write_index: Some(1),
+                    }),
+                }));
+            }
+            ctx.queue.submit([encoder.finish()]);
+        });
+        ctx.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+    });
+
+#[gpu_test]
+static MANY_TIMESTAMP_PASSES: GpuTestConfiguration = GpuTestConfiguration::new()
+    .parameters(TestParameters::default().features(Features::TIMESTAMP_QUERY))
+    .run_sync(|ctx| {
+        let query = ctx.device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: None,
+            ty: wgpu::QueryType::Timestamp,
+            count: 2,
+        });
+        wgpu_test::valid(&ctx.device, || {
+            let mut encoder = ctx.device.create_command_encoder(&Default::default());
+            for _ in 0..8192 {
+                drop(encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: None,
+                    timestamp_writes: Some(ComputePassTimestampWrites {
+                        query_set: &query,
+                        beginning_of_pass_write_index: Some(0),
+                        end_of_pass_write_index: Some(1),
+                    }),
+                }));
+            }
+            ctx.queue.submit([encoder.finish()]);
+        });
+        ctx.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .unwrap();
+    });
 
 const SHADER: &str = r#"
 @compute @workgroup_size(1)

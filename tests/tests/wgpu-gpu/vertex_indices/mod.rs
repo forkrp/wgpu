@@ -356,6 +356,7 @@ async fn vertex_index_common(ctx: TestingContext) {
         let render_bundle;
         let indirect_buffer;
         let mut rpass = encoder1.begin_render_pass(&wgpu::RenderPassDescriptor {
+            max_draw_count: None,
             label: None,
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 ops: wgpu::Operations::default(),

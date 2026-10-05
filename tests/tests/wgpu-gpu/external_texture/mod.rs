@@ -7,6 +7,7 @@ pub fn all_tests(vec: &mut Vec<GpuTestInitializer>) {
     vec.extend([
         EXTERNAL_TEXTURE_DIMENSIONS,
         EXTERNAL_TEXTURE_LOAD,
+        EXTERNAL_TEXTURE_RGBA_CONVERSION,
         EXTERNAL_TEXTURE_LOAD_YUV,
         EXTERNAL_TEXTURE_LOAD_TRANSFORM,
         EXTERNAL_TEXTURE_LOAD_INVALID_ADDRESS,
@@ -157,7 +158,7 @@ fn create_texture_and_view(
             data,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(size.width * format.components() as u32),
+                bytes_per_row: Some(size.width * format.block_copy_size(None).unwrap()),
                 rows_per_image: None,
             },
             size,
@@ -510,6 +511,106 @@ static EXTERNAL_TEXTURE_LOAD: GpuTestConfiguration = GpuTestConfiguration::new()
             wgpu::BindingResource::ExternalTexture(&external_texture),
         );
         assert_eq!(&loads, &[RED_F32, GREEN_F32, BLUE_F32, YELLOW_F32]);
+    });
+
+#[gpu_test]
+static EXTERNAL_TEXTURE_RGBA_CONVERSION: GpuTestConfiguration = GpuTestConfiguration::new()
+    .parameters(
+        TestParameters::default()
+            .test_features_limits()
+            .features(wgpu::Features::EXTERNAL_TEXTURE),
+    )
+    .run_async(|ctx| async move {
+        let pixels: [u16; 4] = [0x7bff, 0xb800, 0x3400, 0x3800];
+        let view = create_texture_and_view(
+            &ctx,
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            wgpu::TextureFormat::Rgba16Float,
+            Some(bytemuck::cast_slice(&pixels)),
+        );
+        let direct = get_loads(&ctx, &[[0, 0]], wgpu::BindingResource::TextureView(&view));
+        assert_eq!(direct[0], [65504., -0.5, 0.25, 0.5]);
+        for premultiplied in [false, true] {
+            for decode_srgb in [false, true] {
+                let source = if decode_srgb {
+                    SRGB_TRANSFER_FUNCTION
+                } else {
+                    Default::default()
+                };
+                let destination = if decode_srgb {
+                    Default::default()
+                } else {
+                    SRGB_TRANSFER_FUNCTION
+                };
+                let external = ctx.device.create_external_texture(
+                    &wgpu::ExternalTextureDescriptor {
+                        label: None,
+                        width: 1,
+                        height: 1,
+                        format: if premultiplied {
+                            wgpu::ExternalTextureFormat::RgbaPremultiplied
+                        } else {
+                            wgpu::ExternalTextureFormat::Rgba
+                        },
+                        yuv_conversion_matrix: IDENTITY_YUV_CONVERSION_MATRIX,
+                        gamut_conversion_matrix: [0.5, 0., 0., 0., 2., 0., 0., 0., 1.],
+                        src_transfer_function: source,
+                        dst_transfer_function: destination,
+                        sample_transform: IDENTITY_SAMPLE_TRANSFORM,
+                        load_transform: IDENTITY_LOAD_TRANSFORM,
+                    },
+                    &[&view],
+                );
+                let mut expected = [65504_f64, -0.5, 0.25];
+                for (channel, scale) in expected.iter_mut().zip([0.5, 2., 1.]) {
+                    if premultiplied {
+                        *channel /= 0.5;
+                    }
+                    if decode_srgb {
+                        *channel = channel.signum()
+                            * if channel.abs() <= 0.04045 {
+                                channel.abs() / 12.92
+                            } else {
+                                ((channel.abs() + 0.055) / 1.055).powf(2.4)
+                            };
+                    }
+                    *channel *= scale;
+                    if !decode_srgb {
+                        *channel = channel.signum()
+                            * if channel.abs() <= 0.0031308 {
+                                channel.abs() * 12.92
+                            } else {
+                                1.055 * channel.abs().powf(1. / 2.4) - 0.055
+                            };
+                    }
+                }
+                let loads = get_loads(
+                    &ctx,
+                    &[[0, 0]],
+                    wgpu::BindingResource::ExternalTexture(&external),
+                );
+                let samples = get_samples(
+                    &ctx,
+                    &[[0.5, 0.5]],
+                    wgpu::BindingResource::ExternalTexture(&external),
+                );
+                for values in [loads[0], samples[0]] {
+                    for i in 0..3 {
+                        assert!(values[i].is_finite());
+                        assert_abs_diff_eq!(
+                            values[i],
+                            expected[i] as f32,
+                            epsilon = (expected[i].abs() as f32 * 2e-5).max(1e-5)
+                        );
+                    }
+                    assert_eq!(values[3], 0.5);
+                }
+            }
+        }
     });
 
 /// Tests that `textureLoad()` returns the correct values for YUV format external

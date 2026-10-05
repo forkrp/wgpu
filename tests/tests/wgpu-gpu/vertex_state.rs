@@ -146,6 +146,7 @@ async fn set_array_stride_to_0(ctx: TestingContext) {
 
     {
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            max_draw_count: None,
             label: None,
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 ops: wgpu::Operations::default(),

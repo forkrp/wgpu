@@ -217,6 +217,7 @@ impl<'ctx> DiscardTestCase<'ctx> {
                 .device
                 .create_command_encoder(&CommandEncoderDescriptor::default());
             encoder.begin_render_pass(&RenderPassDescriptor {
+                max_draw_count: None,
                 label: Some("Depth/Stencil setup"),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(RenderPassDepthStencilAttachment {
@@ -292,6 +293,7 @@ impl<'ctx> DiscardTestCase<'ctx> {
             .as_mut()
             .unwrap()
             .begin_render_pass(&RenderPassDescriptor {
+                max_draw_count: None,
                 label: Some("Discard"),
                 color_attachments: &[self.format.has_color_aspect().then_some(
                     RenderPassColorAttachment {
@@ -328,6 +330,7 @@ impl<'ctx> DiscardTestCase<'ctx> {
             .as_mut()
             .unwrap()
             .begin_render_pass(&RenderPassDescriptor {
+                max_draw_count: None,
                 label: Some("Discard Depth"),
                 color_attachments: &[],
                 depth_stencil_attachment: self.format.is_depth_stencil_format().then_some(
@@ -354,6 +357,7 @@ impl<'ctx> DiscardTestCase<'ctx> {
             .as_mut()
             .unwrap()
             .begin_render_pass(&RenderPassDescriptor {
+                max_draw_count: None,
                 label: Some("Discard Stencil"),
                 color_attachments: &[],
                 depth_stencil_attachment: self.format.is_depth_stencil_format().then_some(

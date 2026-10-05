@@ -74,6 +74,7 @@ async fn render_pass_resource_ownership(ctx: TestingContext) {
 
     {
         let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            max_draw_count: None,
             label: Some("render_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &color_attachment_view,

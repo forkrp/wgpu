@@ -19,7 +19,7 @@ struct NagaExternalTextureParams {
     metal::float3x2 load_transform;
     metal::uint2 size;
     uint num_planes;
-    char _pad8[4];
+    uint is_premultiplied;
 };
 struct NagaExternalTextureWrapper {
     metal::texture2d<float, metal::access::sample> plane0;
@@ -37,7 +37,26 @@ float4 nagaTextureSampleBaseClampToEdge(NagaExternalTextureWrapper tex, metal::s
     float2 plane0_half_texel = float2(0.5, 0.5) / float2(plane0_size);
     float2 plane0_coords = metal::clamp(coords, bounds.xy + plane0_half_texel, bounds.zw - plane0_half_texel);
     if (tex.params.num_planes == 1u) {
-        return tex.plane0.sample(samp, plane0_coords, metal::level(0.0f));
+        float4 rgba = tex.plane0.sample(samp, plane0_coords, metal::level(0.0f));
+        if (tex.params.is_premultiplied != 0u) {
+            rgba.rgb = rgba.a == 0.0 ? float3(0.0, 0.0, 0.0) : rgba.rgb / rgba.a;
+        }
+        float3 srcGammaRgb = rgba.rgb;
+        if (tex.params.src_tf.a == 1.0 && tex.params.src_tf.g == 1.0 && tex.params.src_tf.k == 1.0 &&
+            tex.params.dst_tf.a == 1.0 && tex.params.dst_tf.g == 1.0 && tex.params.dst_tf.k == 1.0 &&
+            metal::all(tex.params.gamut_conversion_matrix[0] == float3(1.0, 0.0, 0.0)) &&
+            metal::all(tex.params.gamut_conversion_matrix[1] == float3(0.0, 1.0, 0.0)) &&
+            metal::all(tex.params.gamut_conversion_matrix[2] == float3(0.0, 0.0, 1.0))) return rgba;
+        float3 srcAbs = metal::abs(srcGammaRgb);
+        float3 srcLinearRgb = metal::copysign(metal::select(
+            metal::pow((srcAbs + tex.params.src_tf.a - 1.0) / tex.params.src_tf.a, tex.params.src_tf.g),
+            srcAbs / tex.params.src_tf.k, srcAbs < tex.params.src_tf.k * tex.params.src_tf.b), srcGammaRgb);
+        float3 dstLinearRgb = tex.params.gamut_conversion_matrix * srcLinearRgb;
+        float3 dstAbs = metal::abs(dstLinearRgb);
+        float3 dstGammaRgb = metal::copysign(metal::select(
+            tex.params.dst_tf.a * metal::pow(dstAbs, 1.0 / tex.params.dst_tf.g) - (tex.params.dst_tf.a - 1.0),
+            tex.params.dst_tf.k * dstAbs, dstAbs < tex.params.dst_tf.b), dstLinearRgb);
+        return float4(dstGammaRgb, rgba.a);
     } else {
         uint2 plane1_size = uint2(tex.plane1.get_width(), tex.plane1.get_height());
         float2 plane1_half_texel = float2(0.5, 0.5) / float2(plane1_size);
@@ -53,17 +72,26 @@ float4 nagaTextureSampleBaseClampToEdge(NagaExternalTextureWrapper tex, metal::s
             uv.x = tex.plane1.sample(samp, plane1_coords, metal::level(0.0f)).x;
             uv.y = tex.plane2.sample(samp, plane2_coords, metal::level(0.0f)).x;
         }
-        float3 srcGammaRgb = (tex.params.yuv_conversion_matrix * float4(y, uv, 1.0)).rgb;
-        float3 srcLinearRgb = metal::select(
-            metal::pow((srcGammaRgb + tex.params.src_tf.a - 1.0) / tex.params.src_tf.a, tex.params.src_tf.g),
-            srcGammaRgb / tex.params.src_tf.k,
-            srcGammaRgb < tex.params.src_tf.k * tex.params.src_tf.b);
+        float4 rgba = float4((tex.params.yuv_conversion_matrix * float4(y, uv, 1.0)).rgb, 1.0);
+        if (tex.params.is_premultiplied != 0u) {
+            rgba.rgb = rgba.a == 0.0 ? float3(0.0, 0.0, 0.0) : rgba.rgb / rgba.a;
+        }
+        float3 srcGammaRgb = rgba.rgb;
+        if (tex.params.src_tf.a == 1.0 && tex.params.src_tf.g == 1.0 && tex.params.src_tf.k == 1.0 &&
+            tex.params.dst_tf.a == 1.0 && tex.params.dst_tf.g == 1.0 && tex.params.dst_tf.k == 1.0 &&
+            metal::all(tex.params.gamut_conversion_matrix[0] == float3(1.0, 0.0, 0.0)) &&
+            metal::all(tex.params.gamut_conversion_matrix[1] == float3(0.0, 1.0, 0.0)) &&
+            metal::all(tex.params.gamut_conversion_matrix[2] == float3(0.0, 0.0, 1.0))) return rgba;
+        float3 srcAbs = metal::abs(srcGammaRgb);
+        float3 srcLinearRgb = metal::copysign(metal::select(
+            metal::pow((srcAbs + tex.params.src_tf.a - 1.0) / tex.params.src_tf.a, tex.params.src_tf.g),
+            srcAbs / tex.params.src_tf.k, srcAbs < tex.params.src_tf.k * tex.params.src_tf.b), srcGammaRgb);
         float3 dstLinearRgb = tex.params.gamut_conversion_matrix * srcLinearRgb;
-        float3 dstGammaRgb = metal::select(
-            tex.params.dst_tf.a * metal::pow(dstLinearRgb, 1.0 / tex.params.dst_tf.g) - (tex.params.dst_tf.a - 1),
-            tex.params.dst_tf.k * dstLinearRgb,
-            dstLinearRgb < tex.params.dst_tf.b);
-        return float4(dstGammaRgb, 1.0);
+        float3 dstAbs = metal::abs(dstLinearRgb);
+        float3 dstGammaRgb = metal::copysign(metal::select(
+            tex.params.dst_tf.a * metal::pow(dstAbs, 1.0 / tex.params.dst_tf.g) - (tex.params.dst_tf.a - 1.0),
+            tex.params.dst_tf.k * dstAbs, dstAbs < tex.params.dst_tf.b), dstLinearRgb);
+        return float4(dstGammaRgb, rgba.a);
     }
 }
 
@@ -73,7 +101,26 @@ float4 nagaTextureLoadExternal(NagaExternalTextureWrapper tex, uint2 coords) {
     coords = metal::min(coords, cropped_size - 1);
     uint2 plane0_coords = uint2(metal::round(tex.params.load_transform * float3(float2(coords), 1.0)));
     if (tex.params.num_planes == 1u) {
-        return tex.plane0.read(plane0_coords);
+        float4 rgba = tex.plane0.read(plane0_coords);
+        if (tex.params.is_premultiplied != 0u) {
+            rgba.rgb = rgba.a == 0.0 ? float3(0.0, 0.0, 0.0) : rgba.rgb / rgba.a;
+        }
+        float3 srcGammaRgb = rgba.rgb;
+        if (tex.params.src_tf.a == 1.0 && tex.params.src_tf.g == 1.0 && tex.params.src_tf.k == 1.0 &&
+            tex.params.dst_tf.a == 1.0 && tex.params.dst_tf.g == 1.0 && tex.params.dst_tf.k == 1.0 &&
+            metal::all(tex.params.gamut_conversion_matrix[0] == float3(1.0, 0.0, 0.0)) &&
+            metal::all(tex.params.gamut_conversion_matrix[1] == float3(0.0, 1.0, 0.0)) &&
+            metal::all(tex.params.gamut_conversion_matrix[2] == float3(0.0, 0.0, 1.0))) return rgba;
+        float3 srcAbs = metal::abs(srcGammaRgb);
+        float3 srcLinearRgb = metal::copysign(metal::select(
+            metal::pow((srcAbs + tex.params.src_tf.a - 1.0) / tex.params.src_tf.a, tex.params.src_tf.g),
+            srcAbs / tex.params.src_tf.k, srcAbs < tex.params.src_tf.k * tex.params.src_tf.b), srcGammaRgb);
+        float3 dstLinearRgb = tex.params.gamut_conversion_matrix * srcLinearRgb;
+        float3 dstAbs = metal::abs(dstLinearRgb);
+        float3 dstGammaRgb = metal::copysign(metal::select(
+            tex.params.dst_tf.a * metal::pow(dstAbs, 1.0 / tex.params.dst_tf.g) - (tex.params.dst_tf.a - 1.0),
+            tex.params.dst_tf.k * dstAbs, dstAbs < tex.params.dst_tf.b), dstLinearRgb);
+        return float4(dstGammaRgb, rgba.a);
     } else {
         uint2 plane1_size = uint2(tex.plane1.get_width(), tex.plane1.get_height());
         uint2 plane1_coords = uint2(metal::floor(float2(plane0_coords) * float2(plane1_size) / float2(plane0_size)));
@@ -86,17 +133,26 @@ float4 nagaTextureLoadExternal(NagaExternalTextureWrapper tex, uint2 coords) {
         uint2 plane2_coords = uint2(metal::floor(float2(plane0_coords) * float2(plane2_size) / float2(plane0_size)));
             uv = float2(tex.plane1.read(plane1_coords).x, tex.plane2.read(plane2_coords).x);
         }
-        float3 srcGammaRgb = (tex.params.yuv_conversion_matrix * float4(y, uv, 1.0)).rgb;
-        float3 srcLinearRgb = metal::select(
-            metal::pow((srcGammaRgb + tex.params.src_tf.a - 1.0) / tex.params.src_tf.a, tex.params.src_tf.g),
-            srcGammaRgb / tex.params.src_tf.k,
-            srcGammaRgb < tex.params.src_tf.k * tex.params.src_tf.b);
+        float4 rgba = float4((tex.params.yuv_conversion_matrix * float4(y, uv, 1.0)).rgb, 1.0);
+        if (tex.params.is_premultiplied != 0u) {
+            rgba.rgb = rgba.a == 0.0 ? float3(0.0, 0.0, 0.0) : rgba.rgb / rgba.a;
+        }
+        float3 srcGammaRgb = rgba.rgb;
+        if (tex.params.src_tf.a == 1.0 && tex.params.src_tf.g == 1.0 && tex.params.src_tf.k == 1.0 &&
+            tex.params.dst_tf.a == 1.0 && tex.params.dst_tf.g == 1.0 && tex.params.dst_tf.k == 1.0 &&
+            metal::all(tex.params.gamut_conversion_matrix[0] == float3(1.0, 0.0, 0.0)) &&
+            metal::all(tex.params.gamut_conversion_matrix[1] == float3(0.0, 1.0, 0.0)) &&
+            metal::all(tex.params.gamut_conversion_matrix[2] == float3(0.0, 0.0, 1.0))) return rgba;
+        float3 srcAbs = metal::abs(srcGammaRgb);
+        float3 srcLinearRgb = metal::copysign(metal::select(
+            metal::pow((srcAbs + tex.params.src_tf.a - 1.0) / tex.params.src_tf.a, tex.params.src_tf.g),
+            srcAbs / tex.params.src_tf.k, srcAbs < tex.params.src_tf.k * tex.params.src_tf.b), srcGammaRgb);
         float3 dstLinearRgb = tex.params.gamut_conversion_matrix * srcLinearRgb;
-        float3 dstGammaRgb = metal::select(
-            tex.params.dst_tf.a * metal::pow(dstLinearRgb, 1.0 / tex.params.dst_tf.g) - (tex.params.dst_tf.a - 1),
-            tex.params.dst_tf.k * dstLinearRgb,
-            dstLinearRgb < tex.params.dst_tf.b);
-        return float4(dstGammaRgb, 1.0);
+        float3 dstAbs = metal::abs(dstLinearRgb);
+        float3 dstGammaRgb = metal::copysign(metal::select(
+            tex.params.dst_tf.a * metal::pow(dstAbs, 1.0 / tex.params.dst_tf.g) - (tex.params.dst_tf.a - 1.0),
+            tex.params.dst_tf.k * dstAbs, dstAbs < tex.params.dst_tf.b), dstLinearRgb);
+        return float4(dstGammaRgb, rgba.a);
     }
 }
 

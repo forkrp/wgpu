@@ -159,6 +159,61 @@ const fn convert_vertex_format_to_naga(format: wgt::VertexFormat) -> nt::VertexF
 }
 
 impl super::Device {
+    fn allocate_timestamp_samples(
+        &self,
+        count: u32,
+    ) -> DeviceResult<Arc<super::CounterAllocation>> {
+        type Pool = Mutex<Vec<Arc<super::CounterPage>>>;
+        static POOLS: std::sync::OnceLock<Mutex<naga::FastHashMap<u64, alloc::sync::Weak<Pool>>>> =
+            std::sync::OnceLock::new();
+        let device = &self.shared.device;
+        let pool = self.shared.timestamp_pool.get_or_init(|| {
+            let mut pools = POOLS.get_or_init(Default::default).lock();
+            pools.retain(|_, pool| pool.strong_count() != 0);
+            let id = device.registryID();
+            if let Some(pool) = pools.get(&id).and_then(alloc::sync::Weak::upgrade) {
+                return pool;
+            }
+            let pool = Arc::new(Pool::default());
+            pools.insert(id, Arc::downgrade(&pool));
+            pool
+        });
+        let mut pages = pool.lock();
+        for page in pages.iter() {
+            if let Ok(range) = page.ranges.lock().allocate_range(count.max(1)) {
+                return Ok(Arc::new(super::CounterAllocation {
+                    page: page.clone(),
+                    range,
+                }));
+            }
+        }
+        let descriptor = MTLCounterSampleBufferDescriptor::new();
+        descriptor.setStorageMode(MTLStorageMode::Shared);
+        unsafe { descriptor.setSampleCount(wgt::QUERY_SET_MAX_QUERIES as usize) };
+        let counter_sets = device.counterSets().ok_or(crate::DeviceError::Unexpected)?;
+        let counter = counter_sets
+            .iter()
+            .find(|counter| &*counter.name() == ns_string!("timestamp"))
+            .ok_or(crate::DeviceError::Unexpected)?;
+        descriptor.setCounterSet(Some(&counter));
+        let buffer = device
+            .newCounterSampleBufferWithDescriptor_error(&descriptor)
+            .map_err(|error| {
+                log::error!("Failed to allocate timestamp counter page: {error:?}");
+                crate::DeviceError::OutOfMemory
+            })?;
+        let mut ranges = range_alloc::RangeAllocator::new(0..wgt::QUERY_SET_MAX_QUERIES);
+        let range = ranges
+            .allocate_range(count.max(1))
+            .map_err(|_| crate::DeviceError::OutOfMemory)?;
+        let page = Arc::new(super::CounterPage {
+            buffer,
+            ranges: Mutex::new(ranges),
+        });
+        pages.push(page.clone());
+        Ok(Arc::new(super::CounterAllocation { page, range }))
+    }
+
     fn load_shader(
         &self,
         stage: &crate::ProgrammableStage<super::ShaderModule>,
@@ -166,6 +221,7 @@ impl super::Device {
         layout: &super::PipelineLayout,
         primitive_class: MTLPrimitiveTopologyClass,
         naga_stage: naga::ShaderStage,
+        sample_mask: Option<u32>,
     ) -> Result<CompiledShader, crate::PipelineError> {
         match stage.module.source {
             ShaderModuleSource::Naga(ref naga_shader) => {
@@ -249,6 +305,7 @@ impl super::Device {
                         MTLPrimitiveTopologyClass::Point => true,
                         _ => false,
                     },
+                    sample_mask,
                     vertex_pulling_transform: true,
                     vertex_buffer_mappings: vertex_buffer_mappings.to_vec(),
                     binding_array_length_map: layout.binding_array_length_map.clone(),
@@ -770,6 +827,8 @@ impl crate::Device for super::Device {
     ) -> Result<super::CommandEncoder, crate::DeviceError> {
         self.counters.command_encoders.add(1);
         Ok(super::CommandEncoder {
+            deferred_pass: None,
+            raw_written: false,
             shared: Arc::clone(&self.shared),
             queue_shared: Arc::clone(&desc.queue.shared),
             raw_cmd_buf: None,
@@ -1457,6 +1516,7 @@ impl crate::Device for super::Device {
                             desc.layout,
                             primitive_class,
                             naga::ShaderStage::Vertex,
+                            None,
                         )?;
 
                         descriptor.setVertexFunction(Some(&vs.function));
@@ -1554,6 +1614,7 @@ impl crate::Device for super::Device {
                             desc.layout,
                             primitive_class,
                             naga::ShaderStage::Task,
+                            None,
                         )?;
                         unsafe { descriptor.setObjectFunction(Some(&ts.function)) };
                         if supports_mutability {
@@ -1583,6 +1644,7 @@ impl crate::Device for super::Device {
                             desc.layout,
                             primitive_class,
                             naga::ShaderStage::Mesh,
+                            None,
                         )?;
                         unsafe { descriptor.setMeshFunction(Some(&ms.function)) };
                         if supports_mutability {
@@ -1624,6 +1686,8 @@ impl crate::Device for super::Device {
                         desc.layout,
                         primitive_class,
                         naga::ShaderStage::Fragment,
+                        (desc.multisample.mask as u32 != u32::MAX)
+                            .then_some(desc.multisample.mask as u32),
                     )?;
 
                     unsafe { descriptor.setFragmentFunction(Some(&fs.function)) };
@@ -1719,7 +1783,6 @@ impl crate::Device for super::Device {
 
             // Setup multisample state
             if desc.multisample.count != 1 {
-                //TODO: handle sample mask
                 match descriptor {
                     MetalGenericRenderPipelineDescriptor::Standard(ref inner) => {
                         #[allow(deprecated)]
@@ -1831,6 +1894,7 @@ impl crate::Device for super::Device {
                     desc.layout,
                     MTLPrimitiveTopologyClass::Unspecified,
                     naga::ShaderStage::Compute,
+                    None,
                 )?
             };
 
@@ -1931,6 +1995,7 @@ impl crate::Device for super::Device {
                     if let Some(label) = desc.label {
                         raw_buffer.setLabel(Some(&NSString::from_str(label)));
                     }
+                    self.counters.query_sets.add(1);
                     Ok(super::QuerySet {
                         raw_buffer,
                         counter_sample_buffer: None,
@@ -1944,34 +2009,7 @@ impl crate::Device for super::Device {
                         .newBufferWithLength_options(size as usize, MTLResourceOptions::empty())
                         .unwrap();
 
-                    let csb_desc = MTLCounterSampleBufferDescriptor::new();
-                    csb_desc.setStorageMode(MTLStorageMode::Shared);
-                    unsafe { csb_desc.setSampleCount(desc.count as _) };
-                    if let Some(label) = desc.label {
-                        csb_desc.setLabel(&NSString::from_str(label));
-                    }
-
-                    let counter_sets = device.counterSets().unwrap();
-                    let timestamp_counter = match counter_sets
-                        .iter()
-                        .find(|cs| &*cs.name() == ns_string!("timestamp"))
-                    {
-                        Some(counter) => counter,
-                        None => {
-                            log::error!("Failed to obtain timestamp counter set.");
-                            return Err(crate::DeviceError::Unexpected);
-                        }
-                    };
-                    csb_desc.setCounterSet(Some(&timestamp_counter));
-
-                    let counter_sample_buffer =
-                        match device.newCounterSampleBufferWithDescriptor_error(&csb_desc) {
-                            Ok(buffer) => buffer,
-                            Err(err) => {
-                                log::error!("Failed to create counter sample buffer: {err:?}");
-                                return Err(crate::DeviceError::Unexpected);
-                            }
-                        };
+                    let counter_sample_buffer = self.allocate_timestamp_samples(desc.count)?;
 
                     self.counters.query_sets.add(1);
 

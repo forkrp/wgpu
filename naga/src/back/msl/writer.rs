@@ -3621,6 +3621,16 @@ impl<W: Write> Writer<W> {
         match result_struct {
             Some(struct_name) => {
                 let mut has_point_size = false;
+                let mut has_sample_mask = false;
+                let sample_mask = match context.origin {
+                    FunctionOrigin::EntryPoint(index)
+                        if context.module.entry_points[index as usize].stage
+                            == crate::ShaderStage::Fragment =>
+                    {
+                        context.pipeline_options.sample_mask
+                    }
+                    _ => None,
+                };
                 let result_ty = context.function.result.as_ref().unwrap().ty;
                 match context.module.types[result_ty].inner {
                     crate::TypeInner::Struct { ref members, .. } => {
@@ -3663,12 +3673,33 @@ impl<W: Write> Writer<W> {
                                 write!(self.out, "}}")?;
                             } else {
                                 write!(self.out, "{comma} {tmp}.{name}")?;
+                                if member.binding
+                                    == Some(crate::Binding::BuiltIn(crate::BuiltIn::SampleMask))
+                                {
+                                    has_sample_mask = true;
+                                    if let Some(mask) = sample_mask {
+                                        write!(self.out, " & {mask}u")?;
+                                    }
+                                }
                             }
                         }
                     }
                     _ => {
                         write!(self.out, "{level}return {struct_name} {{ ")?;
                         self.put_expression(expr_handle, context, true)?;
+                        if context.function.result.as_ref().unwrap().binding
+                            == Some(crate::Binding::BuiltIn(crate::BuiltIn::SampleMask))
+                        {
+                            has_sample_mask = true;
+                            if let Some(mask) = sample_mask {
+                                write!(self.out, " & {mask}u")?;
+                            }
+                        }
+                    }
+                }
+                if !has_sample_mask {
+                    if let Some(mask) = sample_mask {
+                        write!(self.out, ", {mask}u")?;
                     }
                 }
 
@@ -4133,7 +4164,24 @@ impl<W: Write> Writer<W> {
                     )?;
                 }
                 crate::Statement::Return { value: None } => {
-                    writeln!(self.out, "{level}return;")?;
+                    let mask = match context.expression.origin {
+                        FunctionOrigin::EntryPoint(index)
+                            if context.expression.module.entry_points[index as usize].stage
+                                == crate::ShaderStage::Fragment =>
+                        {
+                            context.expression.pipeline_options.sample_mask
+                        }
+                        _ => None,
+                    };
+                    if let Some(mask) = mask {
+                        writeln!(
+                            self.out,
+                            "{level}return {} {{ {mask}u }};",
+                            context.result_struct.unwrap()
+                        )?;
+                    } else {
+                        writeln!(self.out, "{level}return;")?;
+                    }
                 }
                 crate::Statement::Kill => {
                     writeln!(self.out, "{level}{NAMESPACE}::discard_fragment();")?;
@@ -6298,13 +6346,6 @@ template <typename A>
         Ok(())
     }
 
-    /// Helper function used by [`Self::write_wrapped_image_load`] and
-    /// [`Self::write_wrapped_image_sample`] to write the shared YUV to RGB
-    /// conversion code for external textures. Expects the preceding code to
-    /// declare the Y component as a `float` variable of name `y`, the UV
-    /// components as a `float2` variable of name `uv`, and the external
-    /// texture params as a variable of name `params`. The emitted code will
-    /// return the result.
     fn write_convert_yuv_to_rgb_and_return(
         &mut self,
         level: back::Level,
@@ -6312,40 +6353,68 @@ template <typename A>
         uv: &str,
         params: &str,
     ) -> BackendResult {
+        self.write_convert_rgba_and_return(
+            level,
+            &format!("float4(({params}.yuv_conversion_matrix * float4({y}, {uv}, 1.0)).rgb, 1.0)"),
+            params,
+        )
+    }
+
+    fn write_convert_rgba_and_return(
+        &mut self,
+        level: back::Level,
+        rgba: &str,
+        params: &str,
+    ) -> BackendResult {
         let l1 = level;
         let l2 = l1.next();
-
-        // Convert from YUV to non-linear RGB in the source color space.
+        writeln!(self.out, "{l1}float4 rgba = {rgba};")?;
+        writeln!(self.out, "{l1}if ({params}.is_premultiplied != 0u) {{")?;
         writeln!(
             self.out,
-            "{l1}float3 srcGammaRgb = ({params}.yuv_conversion_matrix * float4({y}, {uv}, 1.0)).rgb;"
+            "{l2}rgba.rgb = rgba.a == 0.0 ? float3(0.0, 0.0, 0.0) : rgba.rgb / rgba.a;"
         )?;
-
-        // Apply the inverse of the source transfer function to convert to
-        // linear RGB in the source color space.
-        writeln!(self.out, "{l1}float3 srcLinearRgb = {NAMESPACE}::select(")?;
-        writeln!(self.out, "{l2}{NAMESPACE}::pow((srcGammaRgb + {params}.src_tf.a - 1.0) / {params}.src_tf.a, {params}.src_tf.g),")?;
-        writeln!(self.out, "{l2}srcGammaRgb / {params}.src_tf.k,")?;
+        writeln!(self.out, "{l1}}}")?;
+        writeln!(self.out, "{l1}float3 srcGammaRgb = rgba.rgb;")?;
+        writeln!(self.out, "{l1}if ({params}.src_tf.a == 1.0 && {params}.src_tf.g == 1.0 && {params}.src_tf.k == 1.0 &&")?;
+        writeln!(self.out, "{l2}{params}.dst_tf.a == 1.0 && {params}.dst_tf.g == 1.0 && {params}.dst_tf.k == 1.0 &&")?;
         writeln!(
             self.out,
-            "{l2}srcGammaRgb < {params}.src_tf.k * {params}.src_tf.b);"
+            "{l2}{NAMESPACE}::all({params}.gamut_conversion_matrix[0] == float3(1.0, 0.0, 0.0)) &&"
         )?;
-
-        // Multiply by the gamut conversion matrix to convert to linear RGB in
-        // the destination color space.
+        writeln!(
+            self.out,
+            "{l2}{NAMESPACE}::all({params}.gamut_conversion_matrix[1] == float3(0.0, 1.0, 0.0)) &&"
+        )?;
+        writeln!(self.out, "{l2}{NAMESPACE}::all({params}.gamut_conversion_matrix[2] == float3(0.0, 0.0, 1.0))) return rgba;")?;
+        writeln!(
+            self.out,
+            "{l1}float3 srcAbs = {NAMESPACE}::abs(srcGammaRgb);"
+        )?;
+        writeln!(
+            self.out,
+            "{l1}float3 srcLinearRgb = {NAMESPACE}::copysign({NAMESPACE}::select("
+        )?;
+        writeln!(self.out, "{l2}{NAMESPACE}::pow((srcAbs + {params}.src_tf.a - 1.0) / {params}.src_tf.a, {params}.src_tf.g),")?;
+        writeln!(self.out, "{l2}srcAbs / {params}.src_tf.k, srcAbs < {params}.src_tf.k * {params}.src_tf.b), srcGammaRgb);")?;
         writeln!(
             self.out,
             "{l1}float3 dstLinearRgb = {params}.gamut_conversion_matrix * srcLinearRgb;"
         )?;
-
-        // Finally, apply the dest transfer function to convert to non-linear
-        // RGB in the destination color space, and return the result.
-        writeln!(self.out, "{l1}float3 dstGammaRgb = {NAMESPACE}::select(")?;
-        writeln!(self.out, "{l2}{params}.dst_tf.a * {NAMESPACE}::pow(dstLinearRgb, 1.0 / {params}.dst_tf.g) - ({params}.dst_tf.a - 1),")?;
-        writeln!(self.out, "{l2}{params}.dst_tf.k * dstLinearRgb,")?;
-        writeln!(self.out, "{l2}dstLinearRgb < {params}.dst_tf.b);")?;
-
-        writeln!(self.out, "{l1}return float4(dstGammaRgb, 1.0);")?;
+        writeln!(
+            self.out,
+            "{l1}float3 dstAbs = {NAMESPACE}::abs(dstLinearRgb);"
+        )?;
+        writeln!(
+            self.out,
+            "{l1}float3 dstGammaRgb = {NAMESPACE}::copysign({NAMESPACE}::select("
+        )?;
+        writeln!(self.out, "{l2}{params}.dst_tf.a * {NAMESPACE}::pow(dstAbs, 1.0 / {params}.dst_tf.g) - ({params}.dst_tf.a - 1.0),")?;
+        writeln!(
+            self.out,
+            "{l2}{params}.dst_tf.k * dstAbs, dstAbs < {params}.dst_tf.b), dstLinearRgb);"
+        )?;
+        writeln!(self.out, "{l1}return float4(dstGammaRgb, rgba.a);")?;
         Ok(())
     }
 
@@ -6396,8 +6465,7 @@ template <typename A>
         // Apply load transformation
         writeln!(self.out, "{l1}uint2 plane0_coords = uint2({NAMESPACE}::round(tex.params.load_transform * float3(float2(coords), 1.0)));")?;
         writeln!(self.out, "{l1}if (tex.params.num_planes == 1u) {{")?;
-        // For single plane, simply read from plane0
-        writeln!(self.out, "{l2}return tex.plane0.read(plane0_coords);")?;
+        self.write_convert_rgba_and_return(l2, "tex.plane0.read(plane0_coords)", "tex.params")?;
         writeln!(self.out, "{l1}}} else {{")?;
 
         // Chroma planes may be subsampled so we must scale the coords accordingly.
@@ -6503,10 +6571,10 @@ template <typename A>
                     "{l1}float2 plane0_coords = {NAMESPACE}::clamp(coords, bounds.xy + plane0_half_texel, bounds.zw - plane0_half_texel);"
                 )?;
                 writeln!(self.out, "{l1}if (tex.params.num_planes == 1u) {{")?;
-                // For single plane, simply sample from plane0
-                writeln!(
-                    self.out,
-                    "{l2}return tex.plane0.sample(samp, plane0_coords, {NAMESPACE}::level(0.0f));"
+                self.write_convert_rgba_and_return(
+                    l2,
+                    &format!("tex.plane0.sample(samp, plane0_coords, {NAMESPACE}::level(0.0f))"),
+                    "tex.params",
                 )?;
                 writeln!(self.out, "{l1}}} else {{")?;
                 writeln!(self.out, "{l2}uint2 plane1_size = uint2(tex.plane1.get_width(), tex.plane1.get_height());")?;
@@ -7375,6 +7443,7 @@ template <typename A>
 
                     writeln!(self.out, "struct {stage_out_name} {{")?;
                     let mut has_point_size = false;
+                    let mut has_sample_mask = false;
                     for (name, ty, binding) in result_members {
                         let ty_name = TypeContext {
                             handle: ty,
@@ -7394,6 +7463,8 @@ template <typename A>
                             }
                         }
 
+                        has_sample_mask |=
+                            *binding == crate::Binding::BuiltIn(crate::BuiltIn::SampleMask);
                         let array_len = match module.types[ty].inner {
                             crate::TypeInner::Array {
                                 size: crate::ArraySize::Constant(size),
@@ -7421,6 +7492,25 @@ template <typename A>
                             back::INDENT
                         )?;
                     }
+                    if ep.stage == crate::ShaderStage::Fragment
+                        && pipeline_options.sample_mask.is_some()
+                        && !has_sample_mask
+                    {
+                        let name = self.namer.call("_pipeline_sample_mask");
+                        writeln!(self.out, "{}uint {name} [[sample_mask]];", back::INDENT)?;
+                    }
+                    writeln!(self.out, "}};")?;
+                    &stage_out_name
+                }
+                None if ep.stage == crate::ShaderStage::Fragment
+                    && pipeline_options.sample_mask.is_some() =>
+                {
+                    writeln!(self.out, "struct {stage_out_name} {{")?;
+                    writeln!(
+                        self.out,
+                        "{}uint _pipeline_sample_mask [[sample_mask]];",
+                        back::INDENT
+                    )?;
                     writeln!(self.out, "}};")?;
                     &stage_out_name
                 }

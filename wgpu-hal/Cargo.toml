@@ -87,6 +87,7 @@ metal = [
     "dep:profiling",
     "dep:smallvec",
     "dep:raw-window-metal",
+    "dep:range-alloc",
 ]
 vulkan = [
     "naga/spv-out",
@@ -219,6 +220,7 @@ raw-window-handle.workspace = true
 thiserror.workspace = true
 
 # Target agnostic dependencies used only in backends.
+range-alloc = { workspace = true, optional = true }
 arrayvec = { workspace = true, optional = true }
 bytemuck = { workspace = true, optional = true, features = ["derive"] }
 hashbrown = { workspace = true }
@@ -273,7 +275,6 @@ windows-core = { workspace = true, optional = true }
 windows-result = { workspace = true, optional = true }
 # Backend: Dx12
 bit-set = { workspace = true, optional = true }
-range-alloc = { workspace = true, optional = true }
 once_cell = { workspace = true, optional = true }
 # backend: GLES
 glutin_wgl_sys = { workspace = true, optional = true }

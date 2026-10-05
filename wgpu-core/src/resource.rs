@@ -592,15 +592,23 @@ impl Buffer {
         offset: wgt::BufferAddress,
         binding_size: Option<wgt::BufferSize>,
     ) -> Result<u64, BindingError> {
+        self.resolve_binding_range(offset, binding_size.map(wgt::BufferSize::get))
+    }
+
+    pub fn resolve_binding_range(
+        &self,
+        offset: wgt::BufferAddress,
+        binding_size: Option<wgt::BufferAddress>,
+    ) -> Result<u64, BindingError> {
         let buffer_size = self.size;
 
         match binding_size {
-            Some(binding_size) => match offset.checked_add(binding_size.get()) {
-                Some(end) if end <= buffer_size => Ok(binding_size.get()),
+            Some(binding_size) => match offset.checked_add(binding_size) {
+                Some(end) if end <= buffer_size => Ok(binding_size),
                 _ => Err(BindingError::BindingRangeTooLarge {
                     buffer: self.error_ident(),
                     offset,
-                    binding_size: binding_size.get(),
+                    binding_size,
                     buffer_size,
                 }),
             },
@@ -642,12 +650,25 @@ impl Buffer {
         binding_size: Option<wgt::BufferSize>,
         snatch_guard: &'a SnatchGuard,
     ) -> Result<(hal::BufferBinding<'a, dyn hal::DynBuffer>, u64), BindingError> {
+        self.binding_range(offset, binding_size.map(wgt::BufferSize::get), snatch_guard)
+    }
+
+    pub fn binding_range<'a>(
+        &'a self,
+        offset: wgt::BufferAddress,
+        binding_size: Option<wgt::BufferAddress>,
+        snatch_guard: &'a SnatchGuard,
+    ) -> Result<(hal::BufferBinding<'a, dyn hal::DynBuffer>, u64), BindingError> {
         let buf_raw = self.try_raw(snatch_guard)?;
-        let resolved_size = self.resolve_binding_size(offset, binding_size)?;
+        let resolved_size = self.resolve_binding_range(offset, binding_size)?;
         // SAFETY: The offset and size passed to hal::BufferBinding::new_unchecked must
         // define a binding contained within the buffer.
         Ok((
-            hal::BufferBinding::new_unchecked(buf_raw, offset, binding_size),
+            hal::BufferBinding::new_unchecked(
+                buf_raw,
+                offset,
+                binding_size.and_then(wgt::BufferSize::new),
+            ),
             resolved_size,
         ))
     }

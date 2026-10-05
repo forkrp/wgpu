@@ -667,6 +667,7 @@ var tex: texture_external;
 
     let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor { label: None });
     let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+        max_draw_count: None,
         label: None,
         color_attachments: &[Some(RenderPassColorAttachment {
             view: &target_view,

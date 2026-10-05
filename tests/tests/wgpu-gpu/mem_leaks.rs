@@ -197,6 +197,7 @@ async fn draw_test_with_reports(
     assert_eq!(report.buffers.num_allocated, 1);
 
     let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        max_draw_count: None,
         label: None,
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             ops: wgpu::Operations::default(),

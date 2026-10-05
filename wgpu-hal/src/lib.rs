@@ -2870,6 +2870,8 @@ pub struct PassTimestampWrites<'a, Q: DynQuerySet + ?Sized> {
 
 #[derive(Clone, Debug)]
 pub struct RenderPassDescriptor<'a, Q: DynQuerySet + ?Sized, T: DynTextureView + ?Sized> {
+    /// The caller will encode no commands between beginning and ending this pass.
+    pub is_empty: bool,
     pub label: Label<'a>,
     pub extent: wgt::Extent3d,
     pub sample_count: u32,
@@ -2882,6 +2884,8 @@ pub struct RenderPassDescriptor<'a, Q: DynQuerySet + ?Sized, T: DynTextureView +
 
 #[derive(Clone, Debug)]
 pub struct ComputePassDescriptor<'a, Q: DynQuerySet + ?Sized> {
+    /// The caller will encode no commands between beginning and ending this pass.
+    pub is_empty: bool,
     pub label: Label<'a>,
     pub timestamp_writes: Option<PassTimestampWrites<'a, Q>>,
 }

@@ -440,6 +440,12 @@ impl crate::Module {
                             binding: None,
                             offset: 200,
                         },
+                        crate::StructMember {
+                            name: Some("is_premultiplied".to_string()),
+                            ty: ty_u32,
+                            binding: None,
+                            offset: 204,
+                        },
                     ],
                     span: 208,
                 },
